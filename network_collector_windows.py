@@ -7,18 +7,19 @@ import psutil
 import threading
 import datetime
 import socket
-import time # For sleep
+import time
 
-# Global variable to store the WinDump process
-windump_process = None
+# Global variable to store the TShark process
+tshark_process = None
 # Global list to capture initial stderr lines for error checking
 stderr_capture_list = []
 stderr_capture_lock = threading.Lock()
 
 def find_suitable_interface():
     """
-    Attempts to find a suitable non-loopback network interface name.
+    Attempts to find a suitable non-loopback network interface name for TShark.
     This is a best-effort heuristic. Manual configuration might be needed.
+    TShark can often use descriptive names, but sometimes requires numbers from 'tshark -D'.
     """
     try:
         addrs = psutil.net_if_addrs()
@@ -30,36 +31,34 @@ def find_suitable_interface():
                 if is_loopback: continue
 
                 has_ipv4 = any(addr.family == socket.AF_INET for addr in iface_addrs)
-                # Prioritize interfaces with IPv4 that seem physical (have a MAC)
-                # This is still a heuristic.
                 has_mac = any(addr.family == psutil.AF_LINK for addr in iface_addrs)
 
-                if has_ipv4 and has_mac : # Good candidate
+                if has_ipv4 and has_mac :
                     candidate_interfaces.append(iface_name)
-                elif has_ipv4 and not candidate_interfaces: # Fallback if no MAC interfaces with IPv4 found
+                elif has_ipv4 and not candidate_interfaces:
                     candidate_interfaces.append(iface_name)
 
         if candidate_interfaces:
-            # Prefer shorter names, or names that don't look like GUIDs, if multiple candidates
-            # Simple: just take the first one for now.
             selected = candidate_interfaces[0]
-            print(f"Info: Heuristically selected interface '{selected}' based on psutil info.", file=sys.stderr)
+            # TShark might prefer interface numbers. Psutil names might work directly on some systems.
+            print(f"Info: Heuristically selected interface '{selected}' for TShark based on psutil info.", file=sys.stderr)
             return selected
 
     except Exception as e:
-        print(f"Error finding interface with psutil: {e}. Will let WinDump try its default.", file=sys.stderr)
+        print(f"Error finding interface with psutil: {e}. Will let TShark try its default.", file=sys.stderr)
 
-    print("Info: Could not determine a specific interface via psutil. WinDump will attempt to use its default.", file=sys.stderr)
+    print("Info: Could not determine a specific interface via psutil. TShark will attempt to use its default.", file=sys.stderr)
     return None
 
-def handle_stderr_thread_func(process, initial_capture_list=None, initial_capture_max_lines=5):
+def handle_stderr_thread_func(process, initial_capture_list=None, initial_capture_max_lines=10): # Increased max_lines
     """Reads stderr from process, optionally capturing initial lines."""
     if process and process.stderr:
         lines_captured = 0
         for line in iter(process.stderr.readline, ''):
             if line:
                 line_strip = line.strip()
-                print(f"WinDump STDERR: {line_strip}", file=sys.stderr)
+                # TShark can be verbose on stderr with status, filter for actual errors if needed
+                print(f"TShark STDERR: {line_strip}", file=sys.stderr)
                 sys.stderr.flush()
                 if initial_capture_list is not None and lines_captured < initial_capture_max_lines:
                     with stderr_capture_lock:
@@ -67,23 +66,22 @@ def handle_stderr_thread_func(process, initial_capture_list=None, initial_captur
                     lines_captured += 1
         process.stderr.close()
 
-def start_windump_and_read_stdout(windump_cmd_list):
+def start_tshark_and_read_stdout(tshark_cmd_list):
     """
-    Launches WinDump with the given command list and reads its stdout.
-    Returns True if WinDump started and ran (even if it exits later),
-    False if it failed immediately with a recognized adapter error.
-    Updates global windump_process.
+    Launches TShark with the given command list and reads its stdout.
+    Returns True if TShark started and ran, False if it failed with a recognized adapter error.
+    Updates global tshark_process.
     """
-    global windump_process, stderr_capture_list
+    global tshark_process, stderr_capture_list
 
-    stderr_capture_list.clear() # Clear for this attempt
+    stderr_capture_list.clear()
 
-    print(f"[{datetime.datetime.now().isoformat()}] Attempting to start WinDump with command: {' '.join(windump_cmd_list)}", file=sys.stderr)
+    print(f"[{datetime.datetime.now().isoformat()}] Attempting to start TShark with command: {' '.join(tshark_cmd_list)}", file=sys.stderr)
     sys.stderr.flush()
 
     try:
-        windump_process = subprocess.Popen(
-            windump_cmd_list,
+        tshark_process = subprocess.Popen(
+            tshark_cmd_list,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -92,79 +90,80 @@ def start_windump_and_read_stdout(windump_cmd_list):
             creationflags=subprocess.CREATE_NO_WINDOW
         )
 
-        stderr_thread = threading.Thread(target=handle_stderr_thread_func, args=(windump_process, stderr_capture_list), daemon=True)
+        stderr_thread = threading.Thread(target=handle_stderr_thread_func, args=(tshark_process, stderr_capture_list), daemon=True)
         stderr_thread.start()
 
-        # Brief pause to see if WinDump fails immediately
-        time.sleep(2.0) # Wait 2 seconds
+        time.sleep(2.5) # Slightly longer for TShark initialization and Npcap interaction
 
-        if windump_process.poll() is not None: # Process has terminated
-            # Check if it's the adapter error
+        if tshark_process.poll() is not None:
             with stderr_capture_lock:
+                # Common Npcap/TShark errors for interface issues:
+                # "Error opening adapter", "The system cannot find the device specified",
+                # "can't get target of symbolic link", "No such device"
+                # "The capture session could not be initiated"
+                adapter_error_indicators = [
+                    "Error opening adapter", "cannot find the device specified",
+                    "No such device", "could not be initiated", "failed to set hardware filter"
+                ]
                 for err_line in stderr_capture_list:
-                    if "Error opening adapter" in err_line or "The system cannot find the device specified" in err_line:
-                        print(f"WinDump failed to start with command {' '.join(windump_cmd_list)} due to adapter error.", file=sys.stderr)
-                        return False # Signal failure for fallback
-            # Some other early exit error
-            print(f"WinDump exited quickly with code {windump_process.returncode}. Command: {' '.join(windump_cmd_list)}", file=sys.stderr)
-            return False # Signal failure
+                    if any(indicator in err_line for indicator in adapter_error_indicators):
+                        print(f"TShark failed to start with command {' '.join(tshark_cmd_list)} due to adapter error (see TShark STDERR).", file=sys.stderr)
+                        return False
+            print(f"TShark exited quickly with code {tshark_process.returncode}. Command: {' '.join(tshark_cmd_list)}", file=sys.stderr)
+            return False
 
-        # If process is still running, it likely started OK.
-        print(f"WinDump started successfully with command: {' '.join(windump_cmd_list)}", file=sys.stderr)
-        if windump_process.stdout:
-            for line in iter(windump_process.stdout.readline, ''):
+        print(f"TShark started successfully with command: {' '.join(tshark_cmd_list)}", file=sys.stderr)
+        if tshark_process.stdout:
+            for line in iter(tshark_process.stdout.readline, ''):
                 if line:
                     sys.stdout.write(line)
                     sys.stdout.flush()
-            windump_process.stdout.close()
+            tshark_process.stdout.close()
 
-        windump_process.wait() # Wait for it to finish (e.g. if main loop is exited by external signal)
-        if windump_process.returncode != 0 and windump_process.returncode is not None:
-             print(f"WinDump process (cmd: {' '.join(windump_cmd_list)}) exited with error code {windump_process.returncode}", file=sys.stderr)
-        return True # Ran successfully or exited normally after running
+        tshark_process.wait()
+        if tshark_process.returncode != 0 and tshark_process.returncode is not None:
+             print(f"TShark process (cmd: {' '.join(tshark_cmd_list)}) exited with error code {tshark_process.returncode}", file=sys.stderr)
+        return True
 
     except FileNotFoundError:
-        print(f"Error: {windump_cmd_list[0]} not found. Please ensure WinDump is installed and in PATH.", file=sys.stderr)
-        return False # Critical failure
+        print(f"Error: {tshark_cmd_list[0]} not found. Please ensure TShark (Wireshark) is installed and in PATH.", file=sys.stderr)
+        return False
     except Exception as e:
-        print(f"An unexpected error occurred while trying to run WinDump ({' '.join(windump_cmd_list)}): {e}", file=sys.stderr)
-        return False # Critical failure
+        print(f"An unexpected error occurred while trying to run TShark ({' '.join(tshark_cmd_list)}): {e}", file=sys.stderr)
+        return False
 
 def main():
-    global windump_process
+    global tshark_process
 
     # --- Attempt 1: With psutil-derived interface name ---
-    base_windump_cmd = ["windump.exe", "-n", "-l"]
-    windump_cmd_attempt1 = list(base_windump_cmd) # Make a copy
+    # Basic TShark command: -n (no name resolution), -l (line buffer output)
+    # Consider -P (print packet summary even if writing to file) if needed.
+    # For now, default TShark line output is fine.
+    base_tshark_cmd = ["tshark.exe", "-n", "-l"]
+    tshark_cmd_attempt1 = list(base_tshark_cmd)
 
     selected_interface = find_suitable_interface()
     if selected_interface:
-        windump_cmd_attempt1.extend(["-i", selected_interface])
-        # If find_suitable_interface returned None, windump_cmd_attempt1 will not have -i,
-        # effectively making it same as attempt 2. So, only try specific if selected.
+        tshark_cmd_attempt1.extend(["-i", selected_interface])
 
-        if start_windump_and_read_stdout(windump_cmd_attempt1):
-            return # Success or normal exit
+        if start_tshark_and_read_stdout(tshark_cmd_attempt1):
+            return
 
-        # If we are here, start_windump_and_read_stdout returned False, meaning an adapter error.
-        print("Info: First attempt to run WinDump with selected interface failed. Trying WinDump default.", file=sys.stderr)
+        print("Info: First attempt to run TShark with selected interface failed. Trying TShark default.", file=sys.stderr)
     else:
-        # find_suitable_interface returned None, so proceed directly to default.
-        print("Info: No specific interface selected by psutil. Proceeding with WinDump default.", file=sys.stderr)
+        print("Info: No specific interface selected by psutil. Proceeding with TShark default.", file=sys.stderr)
 
+    # --- Attempt 2: Without -i (TShark default) ---
+    tshark_cmd_attempt2 = list(base_tshark_cmd)
+    if start_tshark_and_read_stdout(tshark_cmd_attempt2):
+        return
 
-    # --- Attempt 2: Without -i (WinDump default) ---
-    # This command will be just ["windump.exe", "-n", "-l"]
-    windump_cmd_attempt2 = list(base_windump_cmd)
-    if start_windump_and_read_stdout(windump_cmd_attempt2):
-        return # Success or normal exit
-
-    # If both attempts fail
-    print("Error: WinDump failed to start with both selected interface and default settings.", file=sys.stderr)
-    print("Please try running 'windump -D' in a command prompt to list available interfaces, "
-          "then manually edit this script (network_collector_windows.py) to specify the correct interface number or name for the '-i' flag.", file=sys.stderr)
+    print("Error: TShark failed to start with both selected interface and default settings.", file=sys.stderr)
+    print("Please try running 'tshark -D' in a command prompt to list available interfaces. "
+          "Then, you might need to manually edit this script (network_collector_windows.py) "
+          "to specify the correct interface number or name for the '-i' flag in 'base_tshark_cmd'. "
+          "Example: base_tshark_cmd = [\"tshark.exe\", \"-n\", \"-l\", \"-i\", \"YOUR_INTERFACE_NUMBER_OR_NAME_HERE\"]", file=sys.stderr)
     sys.stderr.flush()
-
 
 if __name__ == "__main__":
     try:
@@ -172,12 +171,13 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print(f"[{datetime.datetime.now().isoformat()}] network_collector_windows.py: Stopping due to KeyboardInterrupt.", file=sys.stderr)
     finally:
-        if windump_process and windump_process.poll() is None:
-            print(f"[{datetime.datetime.now().isoformat()}] network_collector_windows.py: Terminating WinDump process.", file=sys.stderr)
-            windump_process.terminate()
+        if tshark_process and tshark_process.poll() is None:
+            print(f"[{datetime.datetime.now().isoformat()}] network_collector_windows.py: Terminating TShark process.", file=sys.stderr)
+            tshark_process.terminate()
             try:
-                windump_process.wait(timeout=2)
+                tshark_process.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                windump_process.kill()
+                print(f"[{datetime.datetime.now().isoformat()}] network_collector_windows.py: TShark did not terminate gracefully, killing.", file=sys.stderr)
+                tshark_process.kill()
         print(f"[{datetime.datetime.now().isoformat()}] network_collector_windows.py: Exiting.", file=sys.stderr)
         sys.stderr.flush()
