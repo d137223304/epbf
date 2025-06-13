@@ -14,7 +14,9 @@ import sys # Added for sys.exit
 APP_TITLE = "Windows Host Event Monitor"
 DARK_THEME_BACKGROUND = "#2E2E2E"
 GREEN_ACCENT = "#008A00"
+GREEN_ACCENT_HOVER = "#00A500" # Slightly lighter green for hover
 RED_ACCENT = "#A00000"
+RED_ACCENT_HOVER = "#B80000"   # Slightly lighter red for hover
 MONO_FONT = ("Consolas", 12) # Or "Courier New"
 
 CSV_HEADER = ["Timestamp", "PID", "UID", "Comm", "EventType", "Syscall", "SrcIP", "DstIP", "SrcPort", "DstPort", "Details"]
@@ -25,8 +27,8 @@ class WindowsMonitorApp(ctk.CTk):
 
         self.title(APP_TITLE)
         self.geometry("1000x700")
-        ctk.set_appearance_mode("Dark") # System, Dark, Light
-        ctk.set_default_color_theme("blue") # Default theme
+        ctk.set_appearance_mode("Dark")
+        ctk.set_default_color_theme("blue")
 
         self.configure(fg_color=DARK_THEME_BACKGROUND)
 
@@ -34,12 +36,12 @@ class WindowsMonitorApp(ctk.CTk):
         self.monitoring_active = False
         self.monitor_thread = None
         self.seen_pids = set()
-        self.seen_connections = set() # Store (laddr_ip, raddr_ip, laddr_port, raddr_port, pid) tuples
+        self.seen_connections = set()
         self.output_queue = queue.Queue()
 
         # --- Main Layout ---
-        self.grid_columnconfigure(0, weight=1, minsize=250) # Control Panel
-        self.grid_columnconfigure(1, weight=4)          # Output Panel
+        self.grid_columnconfigure(0, weight=1, minsize=250)
+        self.grid_columnconfigure(1, weight=4)
         self.grid_rowconfigure(0, weight=1)
 
         # --- Left Control Panel (Column 0) ---
@@ -54,7 +56,7 @@ class WindowsMonitorApp(ctk.CTk):
             self.control_panel,
             text="Start Monitoring",
             fg_color=GREEN_ACCENT,
-            hover_color=ctk.CTkColor(GREEN_ACCENT).lighten(0.2),
+            hover_color=GREEN_ACCENT_HOVER, # Corrected: Use static color string
             command=self.toggle_monitoring
         )
         self.start_stop_button.grid(row=1, column=0, pady=10, sticky="ew")
@@ -65,8 +67,7 @@ class WindowsMonitorApp(ctk.CTk):
         self.clear_log_button = ctk.CTkButton(self.control_panel, text="Clear Output", command=self.clear_log)
         self.clear_log_button.grid(row=3, column=0, pady=10, sticky="ew")
 
-        # Spacer to push status to the bottom
-        control_panel_spacer = tk.Frame(self.control_panel, background=DARK_THEME_BACKGROUND) # Use tk.Frame for simple spacer
+        control_panel_spacer = tk.Frame(self.control_panel, background=DARK_THEME_BACKGROUND)
         control_panel_spacer.grid(row=4, column=0, sticky="nsew", pady=(20,0))
         self.control_panel.grid_rowconfigure(4, weight=1)
 
@@ -74,14 +75,14 @@ class WindowsMonitorApp(ctk.CTk):
         self.status_label = ctk.CTkLabel(
             self.control_panel,
             text="Status: Stopped",
-            text_color="red",
+            text_color="red", # Standard color name, or hex
             font=ctk.CTkFont(size=12)
         )
         self.status_label.grid(row=5, column=0, pady=(10,0), sticky="ew")
 
 
         # --- Right Output Panel (Column 1) ---
-        self.output_panel = ctk.CTkFrame(self, fg_color=DARK_THEME_BACKGROUND) # Match theme
+        self.output_panel = ctk.CTkFrame(self, fg_color=DARK_THEME_BACKGROUND)
         self.output_panel.grid(row=0, column=1, sticky="nsew", padx=(0,10), pady=10)
         self.output_panel.grid_rowconfigure(0, weight=1)
         self.output_panel.grid_columnconfigure(0, weight=1)
@@ -89,15 +90,12 @@ class WindowsMonitorApp(ctk.CTk):
         self.output_textbox = ctk.CTkTextbox(
             self.output_panel,
             font=MONO_FONT,
-            wrap=tk.WORD, # Word wrapping, or tk.NONE if horizontal scroll is preferred
+            wrap=tk.WORD,
             state=tk.DISABLED
         )
         self.output_textbox.grid(row=0, column=0, sticky="nsew")
 
-        # Check for queue periodically
         self.after(100, self.process_queue)
-
-        # Handle window close
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def toggle_monitoring(self):
@@ -108,8 +106,9 @@ class WindowsMonitorApp(ctk.CTk):
 
     def start_monitoring_logic(self):
         self.monitoring_active = True
-        self.start_stop_button.configure(text="Stop Monitoring", fg_color=RED_ACCENT, hover_color=ctk.CTkColor(RED_ACCENT).lighten(0.2))
-        self.status_label.configure(text="Status: Running...", text_color="green")
+        # Corrected: Use static color string for hover_color
+        self.start_stop_button.configure(text="Stop Monitoring", fg_color=RED_ACCENT, hover_color=RED_ACCENT_HOVER)
+        self.status_label.configure(text="Status: Running...", text_color="green") # Standard color name, or hex
         self.save_log_button.configure(state=tk.DISABLED)
         self.clear_log_button.configure(state=tk.DISABLED)
 
@@ -123,24 +122,23 @@ class WindowsMonitorApp(ctk.CTk):
         try:
             for conn in psutil.net_connections(kind='tcp4'):
                 if conn.status == psutil.CONN_ESTABLISHED and conn.laddr and conn.raddr and conn.pid is not None:
-                    # Ensure all parts of the tuple are hashable and present
                     conn_tuple = (conn.laddr.ip, conn.raddr.ip, conn.laddr.port, conn.raddr.port, conn.pid)
                     self.seen_connections.add(conn_tuple)
         except Exception as e:
             self.log_to_gui(f"Error initializing connections: {e}\n")
 
-
         self.monitor_thread = threading.Thread(target=self.monitoring_loop, daemon=True)
         self.monitor_thread.start()
 
     def stop_monitoring_logic(self, from_closing=False):
-        self.monitoring_active = False # Signal thread to stop
+        self.monitoring_active = False
         if self.monitor_thread and self.monitor_thread.is_alive():
-            if not from_closing: # Don't try to join if closing, can hang
-                 self.monitor_thread.join(timeout=1) # Wait briefly for thread
+            if not from_closing:
+                 self.monitor_thread.join(timeout=1)
 
-        self.start_stop_button.configure(text="Start Monitoring", fg_color=GREEN_ACCENT, hover_color=ctk.CTkColor(GREEN_ACCENT).lighten(0.2))
-        self.status_label.configure(text="Status: Stopped", text_color="red")
+        # Corrected: Use static color string for hover_color
+        self.start_stop_button.configure(text="Start Monitoring", fg_color=GREEN_ACCENT, hover_color=GREEN_ACCENT_HOVER)
+        self.status_label.configure(text="Status: Stopped", text_color="red") # Standard color name, or hex
         self.save_log_button.configure(state=tk.NORMAL)
         self.clear_log_button.configure(state=tk.NORMAL)
 
@@ -148,12 +146,10 @@ class WindowsMonitorApp(ctk.CTk):
             self.log_to_gui("Warning: Monitoring thread did not stop gracefully.\n")
         self.monitor_thread = None
 
-
     def monitoring_loop(self):
         while self.monitoring_active:
             current_time_iso = datetime.datetime.now().isoformat()
 
-            # --- Process Monitoring ---
             current_pids_iter = []
             try:
                 current_pids_iter = list(psutil.process_iter(['pid', 'name', 'username', 'exe', 'create_time']))
@@ -172,25 +168,20 @@ class WindowsMonitorApp(ctk.CTk):
                         csv_row = [
                             current_time_iso, pid, uid, comm,
                             "process_exec", "CreateProcess",
-                            "", "", "", "", f'"{details_path}"' # Quote path
+                            "", "", "", "", f'"{details_path}"'
                         ]
                         self.output_queue.put(",".join(map(str, csv_row)) + "\n")
                         self.seen_pids.add(pid)
                 except (psutil.NoSuchProcess, psutil.AccessDenied, TypeError, AttributeError):
-                    continue # Process might have ended or access denied
+                    continue
 
             if not self.monitoring_active: break
 
-            # --- Network Monitoring (Outbound TCPv4) ---
             active_connections_now = set()
             try:
                 for conn in psutil.net_connections(kind='tcp4'):
                     if not self.monitoring_active: break
                     if conn.status == psutil.CONN_ESTABLISHED and conn.laddr and conn.raddr and conn.pid is not None:
-                        # We are interested in outbound, so raddr should be a public IP or different subnet typically
-                        # This simple check doesn't guarantee outbound, but captures established connections.
-                        # A more robust outbound check might involve checking raddr against local/private ranges.
-
                         conn_tuple = (conn.laddr.ip, conn.raddr.ip, conn.laddr.port, conn.raddr.port, conn.pid)
                         active_connections_now.add(conn_tuple)
 
@@ -202,7 +193,7 @@ class WindowsMonitorApp(ctk.CTk):
                                 proc_name = p.name()
                                 proc_uid = p.username()
                             except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                pass # Keep N/A if process info is not retrievable
+                                pass
 
                             csv_row = [
                                 current_time_iso, conn.pid, proc_uid, proc_name,
@@ -214,12 +205,8 @@ class WindowsMonitorApp(ctk.CTk):
             except Exception as e:
                 self.output_queue.put(f"Error monitoring connections: {e}\n")
 
-
-            # Clean up old connections from seen_connections that are no longer active
             self.seen_connections.intersection_update(active_connections_now)
-
-            time.sleep(0.5) # Polling interval, adjust as needed
-
+            time.sleep(0.5)
         self.output_queue.put("Monitoring loop stopped.\n")
 
     def process_queue(self):
@@ -230,8 +217,8 @@ class WindowsMonitorApp(ctk.CTk):
         except queue.Empty:
             pass
         finally:
-            if self.winfo_exists(): # Check if window still exists
-                self.after(100, self.process_queue) # Reschedule
+            if self.winfo_exists():
+                self.after(100, self.process_queue)
 
     def log_to_gui(self, message):
         if self.output_textbox.winfo_exists():
@@ -250,15 +237,12 @@ class WindowsMonitorApp(ctk.CTk):
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
             title="Save Log As"
         )
-        if not file_path:
-            return
+        if not file_path: return
 
         try:
             content = self.output_textbox.get("1.0", tk.END)
-            with open(file_path, "w", newline='') as f: # Use newline='' for csv
-                # We are writing raw text content which includes the header already
-                # If we wanted to be super strict, parse and use csv.writer
-                f.write(content.strip() + "\n") # Ensure one newline at end
+            with open(file_path, "w", newline='') as f:
+                f.write(content.strip() + "\n")
             messagebox.showinfo("Save Successful", f"Log saved to {file_path}")
         except Exception as e:
             messagebox.showerror("Error Saving Log", str(e))
@@ -270,8 +254,6 @@ class WindowsMonitorApp(ctk.CTk):
 
         self.output_textbox.configure(state=tk.NORMAL)
         self.output_textbox.delete("1.0", tk.END)
-        # Re-add header if needed, but spec says "Clear Output"
-        # self.output_textbox.insert(tk.END, ",".join(CSV_HEADER) + "\n")
         self.output_textbox.configure(state=tk.DISABLED)
         messagebox.showinfo("Clear Log", "Output cleared.")
 
@@ -281,19 +263,17 @@ class WindowsMonitorApp(ctk.CTk):
                 self.stop_monitoring_logic(from_closing=True)
                 self.destroy()
             else:
-                return # Do not close
+                return
         else:
             self.destroy()
 
 if __name__ == "__main__":
-    # Check for library availability (optional, but good for user feedback if running directly)
     try:
         import customtkinter
         import psutil
     except ImportError as e:
-        # This message box might appear before main window if libs are missing
         root_check = tk.Tk()
-        root_check.withdraw() # Hide the ugly default Tk window
+        root_check.withdraw()
         messagebox.showerror("Missing Libraries",
                              f"Required library not found: {e}.\n"
                              f"Please install customtkinter and psutil via pip.")
