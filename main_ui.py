@@ -10,46 +10,53 @@ import sys
 import os
 import datetime # For enabling Save button with timestamped default name
 
+# --- Determine script directory for robust path handling ---
+# This ensures that collector scripts are found even if the application
+# is run from a different working directory.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # --- Constants ---
 APP_TITLE = "Windows Security Event Monitor"
-DARK_THEME_BACKGROUND = "#2E2E2E" # Or let customtkinter handle default dark theme
+DARK_THEME_BACKGROUND = "#2E2E2E"
 GREEN_ACCENT = "#008A00"
 GREEN_ACCENT_HOVER = "#00A500"
 RED_ACCENT = "#A00000"
 RED_ACCENT_HOVER = "#B80000"
-MONO_FONT = ("Consolas", 11) # Monospaced font for output
+MONO_FONT = ("Consolas", 11)
 
-HOST_COLLECTOR_SCRIPT = "host_collector_windows.py"
-NET_COLLECTOR_SCRIPT = "network_collector_windows.py"
+# Define script names (relative to SCRIPT_DIR)
+_HOST_COLLECTOR_FILENAME = "host_collector_windows.py"
+_NET_COLLECTOR_FILENAME = "network_collector_windows.py"
+
+# Construct absolute paths to the collector scripts
+HOST_COLLECTOR_SCRIPT_PATH = os.path.join(SCRIPT_DIR, _HOST_COLLECTOR_FILENAME)
+NET_COLLECTOR_SCRIPT_PATH = os.path.join(SCRIPT_DIR, _NET_COLLECTOR_FILENAME)
+
 
 class SecurityMonitorApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
         self.title(APP_TITLE)
-        self.geometry("1100x750") # Adjusted size for more content
+        self.geometry("1100x750")
         ctk.set_appearance_mode("Dark")
-        ctk.set_default_color_theme("blue") # or "dark-blue"
+        ctk.set_default_color_theme("blue")
 
-        # --- Process Management ---
         self.host_collector_proc = None
         self.net_collector_proc = None
         self.host_output_queue = queue.Queue()
         self.net_output_queue = queue.Queue()
         self.monitoring_active = False
 
-        # --- Main Layout (3 Rows) ---
-        self.grid_rowconfigure(0, weight=0) # Control Panel (fixed size)
-        self.grid_rowconfigure(1, weight=1) # Output Display (takes most space)
-        self.grid_rowconfigure(2, weight=0) # Status Bar (fixed size)
+        self.grid_rowconfigure(0, weight=0)
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(2, weight=0)
         self.grid_columnconfigure(0, weight=1)
 
-        # --- Top Row: Control Panel ---
         self.control_panel = ctk.CTkFrame(self, corner_radius=0)
         self.control_panel.grid(row=0, column=0, sticky="ew", padx=10, pady=(10,5))
-        # Configure columns for buttons
-        self.control_panel.grid_columnconfigure((0,1,2,3,4,5), weight=0) # Buttons fixed size
-        self.control_panel.grid_columnconfigure(6, weight=1) # Spacer
+        self.control_panel.grid_columnconfigure((0,1,2,3,4,5), weight=0)
+        self.control_panel.grid_columnconfigure(6, weight=1)
 
         self.start_stop_button = ctk.CTkButton(
             self.control_panel, text="Start Collection",
@@ -76,8 +83,6 @@ class SecurityMonitorApp(ctk.CTk):
         self.clear_button = ctk.CTkButton(self.control_panel, text="Clear Output", command=self.clear_all_output)
         self.clear_button.grid(row=0, column=5, padx=(5,10), pady=10)
 
-
-        # --- Middle Row: Output Display (CTkTabview) ---
         self.tab_view = ctk.CTkTabview(self, corner_radius=8)
         self.tab_view.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
 
@@ -93,13 +98,10 @@ class SecurityMonitorApp(ctk.CTk):
         )
         self.net_output_textbox.pack(expand=True, fill="both")
 
-        # --- Bottom Row: Status Bar ---
         self.status_bar = ctk.CTkLabel(self, text="Status: Stopped", text_color="red", anchor="w")
         self.status_bar.grid(row=2, column=0, sticky="ew", padx=10, pady=(5,10))
 
-        # Start processing queues
         self.after(100, self.process_queues)
-        # Handle window close
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def _reader_thread(self, proc, queue_obj, tab_name_for_error_logging):
@@ -108,17 +110,14 @@ class SecurityMonitorApp(ctk.CTk):
                 for line in iter(proc.stdout.readline, ''):
                     if line:
                         queue_obj.put(line)
-                    # Check if thread should stop (e.g. process terminated by stop_collection)
                     if not self.monitoring_active and (proc.poll() is not None):
                         break
                 proc.stdout.close()
         except Exception as e:
             error_msg = f"Error reading from {tab_name_for_error_logging}: {e}\n"
-            # Put error message in the respective queue to display in its textbox
             queue_obj.put(error_msg)
         finally:
-            # Signal that this reader is done or process ended.
-            queue_obj.put(None) # Sentinel value to indicate end of stream or error
+            queue_obj.put(None)
 
     def toggle_collection(self):
         if self.monitoring_active:
@@ -129,48 +128,43 @@ class SecurityMonitorApp(ctk.CTk):
     def start_collection_logic(self):
         if self.monitoring_active: return
 
-        # Check if collector scripts exist
-        if not os.path.exists(HOST_COLLECTOR_SCRIPT):
-            messagebox.showerror("Error", f"{HOST_COLLECTOR_SCRIPT} not found.")
+        # Use absolute paths for checking and launching
+        if not os.path.exists(HOST_COLLECTOR_SCRIPT_PATH):
+            messagebox.showerror("Error", f"{_HOST_COLLECTOR_FILENAME} not found at {HOST_COLLECTOR_SCRIPT_PATH}")
             return
-        if not os.path.exists(NET_COLLECTOR_SCRIPT):
-            messagebox.showerror("Error", f"{NET_COLLECTOR_SCRIPT} not found.")
+        if not os.path.exists(NET_COLLECTOR_SCRIPT_PATH):
+            messagebox.showerror("Error", f"{_NET_COLLECTOR_FILENAME} not found at {NET_COLLECTOR_SCRIPT_PATH}")
             return
 
         self.monitoring_active = True
         self.start_stop_button.configure(text="Stop Collection", fg_color=RED_ACCENT, hover_color=RED_ACCENT_HOVER)
         self.status_bar.configure(text="Status: Running...", text_color="green")
-        self.clear_all_output(show_info=False) # Clear before starting
+        self.clear_all_output(show_info=False)
         self.save_host_log_button.configure(state=tk.DISABLED)
         self.save_net_log_button.configure(state=tk.DISABLED)
         self.save_both_button.configure(state=tk.DISABLED)
 
-
         try:
-            # Start Host Collector
             self.host_collector_proc = subprocess.Popen(
-                [sys.executable, HOST_COLLECTOR_SCRIPT],
+                [sys.executable, HOST_COLLECTOR_SCRIPT_PATH], # Use absolute path
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
             threading.Thread(target=self._reader_thread, args=(self.host_collector_proc, self.host_output_queue, "Host Collector"), daemon=True).start()
 
-            # Start Network Collector
             self.net_collector_proc = subprocess.Popen(
-                [sys.executable, NET_COLLECTOR_SCRIPT],
+                [sys.executable, NET_COLLECTOR_SCRIPT_PATH], # Use absolute path
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
             threading.Thread(target=self._reader_thread, args=(self.net_collector_proc, self.net_output_queue, "Network Collector"), daemon=True).start()
 
-            # Log stderr from collectors to their respective tabs for debugging
             threading.Thread(target=self._log_subprocess_stderr, args=(self.host_collector_proc, self.host_output_queue, "Host Collector"), daemon=True).start()
             threading.Thread(target=self._log_subprocess_stderr, args=(self.net_collector_proc, self.net_output_queue, "Network Collector"), daemon=True).start()
 
-
         except Exception as e:
             messagebox.showerror("Error Starting Collectors", str(e))
-            self.stop_collection_logic(force_ui_update=True) # Try to reset UI
+            self.stop_collection_logic(force_ui_update=True)
 
     def _log_subprocess_stderr(self, proc, queue_obj, name):
         if proc and proc.stderr:
@@ -179,11 +173,10 @@ class SecurityMonitorApp(ctk.CTk):
                     queue_obj.put(f"[{name} STDERR] {line.strip()}\n")
             proc.stderr.close()
 
-
     def stop_collection_logic(self, force_ui_update=False):
         if not self.monitoring_active and not force_ui_update: return
 
-        self.monitoring_active = False # Signal for reader threads
+        self.monitoring_active = False
 
         procs_to_terminate = []
         if self.host_collector_proc and self.host_collector_proc.poll() is None:
@@ -195,17 +188,17 @@ class SecurityMonitorApp(ctk.CTk):
             try:
                 proc.terminate()
             except Exception as e:
-                # Log this to one of the text boxes or a general app log
-                self.host_output_queue.put(f"Error terminating {proc.args[1]}: {e}\n")
+                # proc.args might be None if Popen failed weirdly, use a generic name
+                proc_name = proc.args[1] if proc.args and len(proc.args) > 1 else "collector script"
+                self.host_output_queue.put(f"Error terminating {proc_name}: {e}\n")
 
-        # Wait for processes to terminate (optional, with timeout)
         for proc in procs_to_terminate:
             try:
                 proc.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
-                proc.kill() # Force kill if terminate didn't work
+                proc.kill()
             except Exception:
-                pass # Already terminated or other error
+                pass
 
         self.host_collector_proc = None
         self.net_collector_proc = None
@@ -216,26 +209,22 @@ class SecurityMonitorApp(ctk.CTk):
         self.save_net_log_button.configure(state=tk.NORMAL if self.net_output_textbox.get("1.0", tk.END).strip() else tk.DISABLED)
         self.save_both_button.configure(state=tk.NORMAL if (self.host_output_textbox.get("1.0", tk.END).strip() or self.net_output_textbox.get("1.0", tk.END).strip()) else tk.DISABLED)
 
-
     def process_queues(self):
-        # Process host queue
         try:
             while True:
                 line = self.host_output_queue.get_nowait()
-                if line is None: # Sentinel
-                    # Reader thread for host collector ended
-                    if self.monitoring_active: # If still supposed to be active, it might be an error
+                if line is None:
+                    if self.monitoring_active:
                          self._append_to_textbox(self.host_output_textbox, "[Host collector stream ended unexpectedly]\n")
                     break
                 self._append_to_textbox(self.host_output_textbox, line)
         except queue.Empty:
             pass
 
-        # Process network queue
         try:
             while True:
                 line = self.net_output_queue.get_nowait()
-                if line is None: # Sentinel
+                if line is None:
                     if self.monitoring_active:
                          self._append_to_textbox(self.net_output_textbox, "[Network collector stream ended unexpectedly]\n")
                     break
@@ -243,14 +232,12 @@ class SecurityMonitorApp(ctk.CTk):
         except queue.Empty:
             pass
 
-        # Enable save buttons if there's content and not monitoring
         if not self.monitoring_active:
             self.save_host_log_button.configure(state=tk.NORMAL if self.host_output_textbox.get("1.0", tk.END).strip() else tk.DISABLED)
             self.save_net_log_button.configure(state=tk.NORMAL if self.net_output_textbox.get("1.0", tk.END).strip() else tk.DISABLED)
             self.save_both_button.configure(state=tk.NORMAL if (self.host_output_textbox.get("1.0", tk.END).strip() or self.net_output_textbox.get("1.0", tk.END).strip()) else tk.DISABLED)
 
-
-        if self.winfo_exists(): # Reschedule if window is still open
+        if self.winfo_exists():
             self.after(100, self.process_queues)
 
     def _append_to_textbox(self, textbox, text):
@@ -268,7 +255,7 @@ class SecurityMonitorApp(ctk.CTk):
             default_filename = f"host_events_{datetime.datetime.now():%Y%m%d_%H%M%S}.csv"
         elif log_type == "network":
             textbox = self.net_output_textbox
-            default_filename = f"network_traffic_{datetime.datetime.now():%Y%m%d_%H%M%S}.txt" # WinDump output is not CSV
+            default_filename = f"network_traffic_{datetime.datetime.now():%Y%m%d_%H%M%S}.txt"
         else:
             return
 
@@ -286,13 +273,12 @@ class SecurityMonitorApp(ctk.CTk):
 
         try:
             with open(file_path, "w", encoding='utf-8', newline='' if log_type == "host" else None) as f:
-                f.write(content + "\n") # Add newline at end if stripped
+                f.write(content + "\n")
             messagebox.showinfo("Save Successful", f"Log saved to {file_path}")
         except Exception as e:
             messagebox.showerror("Error Saving Log", str(e))
 
     def save_both_logs(self):
-        # Save host log
         host_content = self.host_output_textbox.get("1.0", tk.END).strip()
         if host_content:
             file_path_host = filedialog.asksaveasfilename(
@@ -307,13 +293,12 @@ class SecurityMonitorApp(ctk.CTk):
                     messagebox.showinfo("Save Successful", f"Host log saved to {file_path_host}")
                 except Exception as e:
                     messagebox.showerror("Error Saving Host Log", str(e))
-            else: # User cancelled host save
+            else:
                 if not messagebox.askyesno("Continue?", "Host log saving cancelled. Continue to save network log?"):
                     return
         else:
             messagebox.showinfo("Save Both", "No host events to save.")
 
-        # Save network log
         net_content = self.net_output_textbox.get("1.0", tk.END).strip()
         if net_content:
             file_path_net = filedialog.asksaveasfilename(
@@ -331,12 +316,15 @@ class SecurityMonitorApp(ctk.CTk):
         else:
             messagebox.showinfo("Save Both", "No network traffic to save.")
 
-
     def clear_all_output(self, show_info=True):
-        self._append_to_textbox(self.host_output_textbox, "") # Clear by inserting empty
+        self.host_output_textbox.configure(state=tk.NORMAL)
         self.host_output_textbox.delete("1.0", tk.END)
-        self._append_to_textbox(self.net_output_textbox, "")
+        self.host_output_textbox.configure(state=tk.DISABLED)
+
+        self.net_output_textbox.configure(state=tk.NORMAL)
         self.net_output_textbox.delete("1.0", tk.END)
+        self.net_output_textbox.configure(state=tk.DISABLED)
+
         if show_info:
             messagebox.showinfo("Clear Output", "All output cleared.")
 
@@ -344,18 +332,16 @@ class SecurityMonitorApp(ctk.CTk):
         if self.monitoring_active:
             if messagebox.askyesno(APP_TITLE, "Monitoring is active. Are you sure you want to quit? This will stop all collectors."):
                 self.stop_collection_logic()
-                # Allow some time for processes to terminate before destroying window
                 self.after(500, self.destroy)
             else:
-                return # Do not close
+                return
         else:
             self.destroy()
 
 if __name__ == "__main__":
     try:
-        import customtkinter # Check for main GUI lib
+        import customtkinter
     except ImportError:
-        # Simplified error for missing customtkinter, as it's the core of this UI script.
         root_check = tk.Tk()
         root_check.withdraw()
         messagebox.showerror("Missing Library", "customtkinter is not installed. Please install it via pip.")
