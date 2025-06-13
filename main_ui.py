@@ -1,259 +1,366 @@
+#!/usr/bin/env python3
+
+import customtkinter as ctk
 import tkinter as tk
-from tkinter import ttk, scrolledtext, filedialog, messagebox
+from tkinter import filedialog, messagebox
 import subprocess
 import threading
+import queue
 import sys
 import os
-import csv
-from datetime import datetime
+import datetime # For enabling Save button with timestamped default name
 
-class HostMonitorApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Host Event Monitor")
-        self.root.geometry("800x600")
+# --- Constants ---
+APP_TITLE = "Windows Security Event Monitor"
+DARK_THEME_BACKGROUND = "#2E2E2E" # Or let customtkinter handle default dark theme
+GREEN_ACCENT = "#008A00"
+GREEN_ACCENT_HOVER = "#00A500"
+RED_ACCENT = "#A00000"
+RED_ACCENT_HOVER = "#B80000"
+MONO_FONT = ("Consolas", 11) # Monospaced font for output
 
-        self.collector_process = None
-        self.output_thread = None
-        self.is_collecting = False
+HOST_COLLECTOR_SCRIPT = "host_collector_windows.py"
+NET_COLLECTOR_SCRIPT = "network_collector_windows.py"
 
-        # --- Top Frame for Controls ---
-        control_frame = ttk.Frame(root, padding="10")
-        control_frame.pack(side=tk.TOP, fill=tk.X)
+class SecurityMonitorApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
 
-        self.start_button = ttk.Button(control_frame, text="Start Collection", command=self.start_collection)
-        self.start_button.pack(side=tk.LEFT, padx=5)
+        self.title(APP_TITLE)
+        self.geometry("1100x750") # Adjusted size for more content
+        ctk.set_appearance_mode("Dark")
+        ctk.set_default_color_theme("blue") # or "dark-blue"
 
-        self.stop_button = ttk.Button(control_frame, text="Stop Collection", command=self.stop_collection, state=tk.DISABLED)
-        self.stop_button.pack(side=tk.LEFT, padx=5)
+        # --- Process Management ---
+        self.host_collector_proc = None
+        self.net_collector_proc = None
+        self.host_output_queue = queue.Queue()
+        self.net_output_queue = queue.Queue()
+        self.monitoring_active = False
 
-        self.save_button = ttk.Button(control_frame, text="Save to File", command=self.save_to_file)
-        self.save_button.pack(side=tk.LEFT, padx=5)
+        # --- Main Layout (3 Rows) ---
+        self.grid_rowconfigure(0, weight=0) # Control Panel (fixed size)
+        self.grid_rowconfigure(1, weight=1) # Output Display (takes most space)
+        self.grid_rowconfigure(2, weight=0) # Status Bar (fixed size)
+        self.grid_columnconfigure(0, weight=1)
 
-        self.clear_button = ttk.Button(control_frame, text="Clear Output", command=self.clear_output)
-        self.clear_button.pack(side=tk.LEFT, padx=5)
+        # --- Top Row: Control Panel ---
+        self.control_panel = ctk.CTkFrame(self, corner_radius=0)
+        self.control_panel.grid(row=0, column=0, sticky="ew", padx=10, pady=(10,5))
+        # Configure columns for buttons
+        self.control_panel.grid_columnconfigure((0,1,2,3,4,5), weight=0) # Buttons fixed size
+        self.control_panel.grid_columnconfigure(6, weight=1) # Spacer
 
-        # --- Output Text Area ---
-        self.output_area = scrolledtext.ScrolledText(root, wrap=tk.WORD, state=tk.DISABLED, height=20)
-        self.output_area.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+        self.start_stop_button = ctk.CTkButton(
+            self.control_panel, text="Start Collection",
+            fg_color=GREEN_ACCENT, hover_color=GREEN_ACCENT_HOVER,
+            command=self.toggle_collection
+        )
+        self.start_stop_button.grid(row=0, column=0, padx=5, pady=10)
 
-        # --- Status Bar ---
-        self.status_var = tk.StringVar()
-        self.status_var.set("Status: Stopped")
-        self.status_bar_label = ttk.Label(root, textvariable=self.status_var, relief=tk.SUNKEN, foreground="red", padding="5") # Store as instance variable
-        self.status_bar_label.pack(side=tk.BOTTOM, fill=tk.X)
+        self.save_host_log_button = ctk.CTkButton(self.control_panel, text="Save Host Log", command=lambda: self.save_log("host"))
+        self.save_host_log_button.grid(row=0, column=1, padx=5, pady=10)
+        self.save_host_log_button.configure(state=tk.DISABLED)
 
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.save_net_log_button = ctk.CTkButton(self.control_panel, text="Save Network Log", command=lambda: self.save_log("network"))
+        self.save_net_log_button.grid(row=0, column=2, padx=5, pady=10)
+        self.save_net_log_button.configure(state=tk.DISABLED)
 
-    def _get_collector_script_path(self):
-        base_path = os.path.dirname(os.path.abspath(__file__))
-        if sys.platform.startswith("linux"):
-            return os.path.join(base_path, "collector_linux.py")
-        elif sys.platform.startswith("win"):
-            return os.path.join(base_path, "collector_windows.py")
+        self.save_both_button = ctk.CTkButton(self.control_panel, text="Save Both", command=self.save_both_logs)
+        self.save_both_button.grid(row=0, column=3, padx=5, pady=10)
+        self.save_both_button.configure(state=tk.DISABLED)
+
+        self.correlate_button = ctk.CTkButton(self.control_panel, text="Correlate Data", state="disabled")
+        self.correlate_button.grid(row=0, column=4, padx=5, pady=10)
+
+        self.clear_button = ctk.CTkButton(self.control_panel, text="Clear Output", command=self.clear_all_output)
+        self.clear_button.grid(row=0, column=5, padx=(5,10), pady=10)
+
+
+        # --- Middle Row: Output Display (CTkTabview) ---
+        self.tab_view = ctk.CTkTabview(self, corner_radius=8)
+        self.tab_view.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+
+        self.tab_view.add("Host Events (psutil)")
+        self.host_output_textbox = ctk.CTkTextbox(
+            self.tab_view.tab("Host Events (psutil)"), font=MONO_FONT, wrap=tk.WORD, state=tk.DISABLED
+        )
+        self.host_output_textbox.pack(expand=True, fill="both")
+
+        self.tab_view.add("Network Traffic (WinDump)")
+        self.net_output_textbox = ctk.CTkTextbox(
+            self.tab_view.tab("Network Traffic (WinDump)"), font=MONO_FONT, wrap=tk.WORD, state=tk.DISABLED
+        )
+        self.net_output_textbox.pack(expand=True, fill="both")
+
+        # --- Bottom Row: Status Bar ---
+        self.status_bar = ctk.CTkLabel(self, text="Status: Stopped", text_color="red", anchor="w")
+        self.status_bar.grid(row=2, column=0, sticky="ew", padx=10, pady=(5,10))
+
+        # Start processing queues
+        self.after(100, self.process_queues)
+        # Handle window close
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def _reader_thread(self, proc, queue_obj, tab_name_for_error_logging):
+        try:
+            if proc and proc.stdout:
+                for line in iter(proc.stdout.readline, ''):
+                    if line:
+                        queue_obj.put(line)
+                    # Check if thread should stop (e.g. process terminated by stop_collection)
+                    if not self.monitoring_active and (proc.poll() is not None):
+                        break
+                proc.stdout.close()
+        except Exception as e:
+            error_msg = f"Error reading from {tab_name_for_error_logging}: {e}\n"
+            # Put error message in the respective queue to display in its textbox
+            queue_obj.put(error_msg)
+        finally:
+            # Signal that this reader is done or process ended.
+            queue_obj.put(None) # Sentinel value to indicate end of stream or error
+
+    def toggle_collection(self):
+        if self.monitoring_active:
+            self.stop_collection_logic()
         else:
-            messagebox.showerror("Unsupported OS", f"Operating system {sys.platform} is not supported.")
-            return None
+            self.start_collection_logic()
 
-    def start_collection(self):
-        collector_script = self._get_collector_script_path()
-        if not collector_script:
+    def start_collection_logic(self):
+        if self.monitoring_active: return
+
+        # Check if collector scripts exist
+        if not os.path.exists(HOST_COLLECTOR_SCRIPT):
+            messagebox.showerror("Error", f"{HOST_COLLECTOR_SCRIPT} not found.")
+            return
+        if not os.path.exists(NET_COLLECTOR_SCRIPT):
+            messagebox.showerror("Error", f"{NET_COLLECTOR_SCRIPT} not found.")
             return
 
-        if not os.path.exists(collector_script):
-            messagebox.showerror("Error", f"Collector script not found: {collector_script}. Please ensure it is in the same directory as main_ui.py.")
-            return
+        self.monitoring_active = True
+        self.start_stop_button.configure(text="Stop Collection", fg_color=RED_ACCENT, hover_color=RED_ACCENT_HOVER)
+        self.status_bar.configure(text="Status: Running...", text_color="green")
+        self.clear_all_output(show_info=False) # Clear before starting
+        self.save_host_log_button.configure(state=tk.DISABLED)
+        self.save_net_log_button.configure(state=tk.DISABLED)
+        self.save_both_button.configure(state=tk.DISABLED)
 
-        if self.is_collecting:
-            messagebox.showwarning("Collection Running", "Collection is already in progress.")
-            return
-
-        self.is_collecting = True
-        self.clear_output()
-        self.output_area.config(state=tk.NORMAL)
-        self.output_area.insert(tk.END, f"Attempting to start {os.path.basename(collector_script)}...\n")
-        self.output_area.config(state=tk.DISABLED)
-        self.output_area.see(tk.END)
 
         try:
-            self.collector_process = subprocess.Popen(
-                [sys.executable, collector_script],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                universal_newlines=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0
+            # Start Host Collector
+            self.host_collector_proc = subprocess.Popen(
+                [sys.executable, HOST_COLLECTOR_SCRIPT],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+                creationflags=subprocess.CREATE_NO_WINDOW
             )
-            self._append_output(f"{os.path.basename(collector_script)} started. PID: {self.collector_process.pid}\n")
+            threading.Thread(target=self._reader_thread, args=(self.host_collector_proc, self.host_output_queue, "Host Collector"), daemon=True).start()
 
-            self.output_thread = threading.Thread(target=self._read_output, daemon=True)
-            self.output_thread.start()
+            # Start Network Collector
+            self.net_collector_proc = subprocess.Popen(
+                [sys.executable, NET_COLLECTOR_SCRIPT],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            threading.Thread(target=self._reader_thread, args=(self.net_collector_proc, self.net_output_queue, "Network Collector"), daemon=True).start()
 
-            self.status_var.set("Status: Running")
-            self.status_bar_label.config(foreground="green")
+            # Log stderr from collectors to their respective tabs for debugging
+            threading.Thread(target=self._log_subprocess_stderr, args=(self.host_collector_proc, self.host_output_queue, "Host Collector"), daemon=True).start()
+            threading.Thread(target=self._log_subprocess_stderr, args=(self.net_collector_proc, self.net_output_queue, "Network Collector"), daemon=True).start()
 
-            self.start_button.config(state=tk.DISABLED)
-            self.stop_button.config(state=tk.NORMAL)
 
         except Exception as e:
-            self.is_collecting = False
-            messagebox.showerror("Error Starting Collector", str(e))
-            self.status_var.set("Status: Stopped")
-            self.status_bar_label.config(foreground="red")
-            self.start_button.config(state=tk.NORMAL)
-            self.stop_button.config(state=tk.DISABLED)
-            self._append_output(f"Error starting collector: {e}\n")
+            messagebox.showerror("Error Starting Collectors", str(e))
+            self.stop_collection_logic(force_ui_update=True) # Try to reset UI
 
-
-    def _read_output(self):
-        if self.collector_process and self.collector_process.stdout:
-            for line in iter(self.collector_process.stdout.readline, ''):
+    def _log_subprocess_stderr(self, proc, queue_obj, name):
+        if proc and proc.stderr:
+            for line in iter(proc.stderr.readline, ''):
                 if line:
-                    self.root.after(0, self._append_output, line)
-                if not self.is_collecting:
-                    break
-
-            # Process remaining stderr after stdout is done or if an error occurs
-            if self.collector_process:
-                stderr_output = ""
-                try:
-                    # Non-blocking read for stderr if possible, or handle termination
-                    if self.collector_process.stderr:
-                        stderr_output = self.collector_process.stderr.read()
-                except Exception as e:
-                     # Handle cases where stderr might not be available (e.g., process already terminated)
-                    stderr_output = f"Error reading stderr: {e}\n"
-
-                if stderr_output:
-                    self.root.after(0, self._append_output, f"STDERR: {stderr_output}")
-
-        self.root.after(0, self._collection_finished)
+                    queue_obj.put(f"[{name} STDERR] {line.strip()}\n")
+            proc.stderr.close()
 
 
-    def _append_output(self, text):
-        self.output_area.config(state=tk.NORMAL)
-        self.output_area.insert(tk.END, text)
-        self.output_area.see(tk.END)
-        self.output_area.config(state=tk.DISABLED)
+    def stop_collection_logic(self, force_ui_update=False):
+        if not self.monitoring_active and not force_ui_update: return
 
-    def stop_collection(self):
-        if not self.is_collecting or not self.collector_process:
-            # messagebox.showwarning("Collection Not Running", "No collection process is currently active.") # Can be noisy
-            if not self.collector_process and self.is_collecting: # Edge case: flag set but process died
-                 self._collection_finished() # Reset UI
-            return
+        self.monitoring_active = False # Signal for reader threads
 
-        current_pid = self.collector_process.pid if self.collector_process else "N/A"
-        self._append_output(f"\nAttempting to stop collector process (PID: {current_pid})...\n")
-        self.is_collecting = False
+        procs_to_terminate = []
+        if self.host_collector_proc and self.host_collector_proc.poll() is None:
+            procs_to_terminate.append(self.host_collector_proc)
+        if self.net_collector_proc and self.net_collector_proc.poll() is None:
+            procs_to_terminate.append(self.net_collector_proc)
 
-        if self.collector_process:
+        for proc in procs_to_terminate:
             try:
-                if self.collector_process.poll() is None:
-                    self.collector_process.terminate()
-                    try:
-                        self.collector_process.wait(timeout=5)
-                        self._append_output(f"Collector process (PID: {current_pid}) terminated.\n")
-                    except subprocess.TimeoutExpired:
-                        self._append_output(f"Collector process (PID: {current_pid}) did not terminate gracefully, killing...\n")
-                        self.collector_process.kill()
-                        self.collector_process.wait(timeout=2) # Wait for kill
-                        self._append_output(f"Collector process (PID: {current_pid}) killed.\n")
-                else:
-                    self._append_output(f"Collector process (PID: {current_pid}) already terminated.\n")
+                proc.terminate()
             except Exception as e:
-                self._append_output(f"Error during collector process termination (PID: {current_pid}): {e}\n")
-            finally:
-                self.collector_process = None
+                # Log this to one of the text boxes or a general app log
+                self.host_output_queue.put(f"Error terminating {proc.args[1]}: {e}\n")
 
-        # Call _collection_finished directly to ensure UI updates,
-        # as the reading thread might have already exited or might be blocked.
-        self._collection_finished()
+        # Wait for processes to terminate (optional, with timeout)
+        for proc in procs_to_terminate:
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                proc.kill() # Force kill if terminate didn't work
+            except Exception:
+                pass # Already terminated or other error
+
+        self.host_collector_proc = None
+        self.net_collector_proc = None
+
+        self.start_stop_button.configure(text="Start Collection", fg_color=GREEN_ACCENT, hover_color=GREEN_ACCENT_HOVER)
+        self.status_bar.configure(text="Status: Stopped", text_color="red")
+        self.save_host_log_button.configure(state=tk.NORMAL if self.host_output_textbox.get("1.0", tk.END).strip() else tk.DISABLED)
+        self.save_net_log_button.configure(state=tk.NORMAL if self.net_output_textbox.get("1.0", tk.END).strip() else tk.DISABLED)
+        self.save_both_button.configure(state=tk.NORMAL if (self.host_output_textbox.get("1.0", tk.END).strip() or self.net_output_textbox.get("1.0", tk.END).strip()) else tk.DISABLED)
 
 
-    def _collection_finished(self):
-        self.is_collecting = False # Explicitly set flag
-
-        # Clean up collector_process if it wasn't done in stop_collection
-        if self.collector_process:
-            if self.collector_process.poll() is None: # Still running?
-                try:
-                    self.collector_process.kill()
-                    self.collector_process.wait(timeout=1) # Brief wait
-                except Exception:
-                    pass # Best effort
-            self.collector_process = None
-
-        self.status_var.set("Status: Stopped")
-        if hasattr(self, 'status_bar_label'): # Check if status_bar_label exists
-             self.status_bar_label.config(foreground="red")
-
-        self.start_button.config(state=tk.NORMAL)
-        self.stop_button.config(state=tk.DISABLED)
-
-        # self._append_output("Collection stopped.\n") # This can be redundant if stop_collection also appends
-        # Check thread status
-        if self.output_thread and self.output_thread.is_alive():
-            # Thread should exit due to self.is_collecting = False
-            # and readline returning EOF or empty string.
-            # No explicit join() here to avoid blocking UI if thread is stuck,
-            # daemon=True ensures it exits with main.
+    def process_queues(self):
+        # Process host queue
+        try:
+            while True:
+                line = self.host_output_queue.get_nowait()
+                if line is None: # Sentinel
+                    # Reader thread for host collector ended
+                    if self.monitoring_active: # If still supposed to be active, it might be an error
+                         self._append_to_textbox(self.host_output_textbox, "[Host collector stream ended unexpectedly]\n")
+                    break
+                self._append_to_textbox(self.host_output_textbox, line)
+        except queue.Empty:
             pass
 
-    def save_to_file(self):
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
-        )
-        if not file_path:
+        # Process network queue
+        try:
+            while True:
+                line = self.net_output_queue.get_nowait()
+                if line is None: # Sentinel
+                    if self.monitoring_active:
+                         self._append_to_textbox(self.net_output_textbox, "[Network collector stream ended unexpectedly]\n")
+                    break
+                self._append_to_textbox(self.net_output_textbox, line)
+        except queue.Empty:
+            pass
+
+        # Enable save buttons if there's content and not monitoring
+        if not self.monitoring_active:
+            self.save_host_log_button.configure(state=tk.NORMAL if self.host_output_textbox.get("1.0", tk.END).strip() else tk.DISABLED)
+            self.save_net_log_button.configure(state=tk.NORMAL if self.net_output_textbox.get("1.0", tk.END).strip() else tk.DISABLED)
+            self.save_both_button.configure(state=tk.NORMAL if (self.host_output_textbox.get("1.0", tk.END).strip() or self.net_output_textbox.get("1.0", tk.END).strip()) else tk.DISABLED)
+
+
+        if self.winfo_exists(): # Reschedule if window is still open
+            self.after(100, self.process_queues)
+
+    def _append_to_textbox(self, textbox, text):
+        if textbox.winfo_exists():
+            textbox.configure(state=tk.NORMAL)
+            textbox.insert(tk.END, text)
+            textbox.see(tk.END)
+            textbox.configure(state=tk.DISABLED)
+
+    def save_log(self, log_type):
+        textbox = None
+        default_filename = ""
+        if log_type == "host":
+            textbox = self.host_output_textbox
+            default_filename = f"host_events_{datetime.datetime.now():%Y%m%d_%H%M%S}.csv"
+        elif log_type == "network":
+            textbox = self.net_output_textbox
+            default_filename = f"network_traffic_{datetime.datetime.now():%Y%m%d_%H%M%S}.txt" # WinDump output is not CSV
+        else:
             return
 
+        content = textbox.get("1.0", tk.END).strip()
+        if not content:
+            messagebox.showinfo("Save Log", "Nothing to save.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            initialfile=default_filename,
+            defaultextension=".csv" if log_type == "host" else ".txt",
+            filetypes=[("CSV files", "*.csv"), ("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        if not file_path: return
+
         try:
-            content = self.output_area.get(1.0, tk.END).strip() # Get all content and strip trailing newline
-
-            # A simple check if it looks like CSV.
-            # More robust would be to try parsing it with csv module or store data in a list of lists.
-            lines = content.split('\n')
-            is_likely_csv = False
-            if lines:
-                # Check if the first non-empty line looks like a header or data
-                for line in lines:
-                    if line.strip(): # Find first non-empty line
-                        if "Timestamp,PID,UID,Comm,EventType,Syscall" in line or (',' in line and len(line.split(',')) > 3):
-                            is_likely_csv = True
-                        break
-
-            if not is_likely_csv:
-                 if not messagebox.askyesno("Save Warning", "The output may not be in the expected CSV format or is empty. Save anyway?"):
-                    return
-
-            with open(file_path, "w", newline="") as f:
-                # For now, write the raw text area content.
-                # If strict CSV is needed, this part would need to parse 'content'
-                # and use a csv.writer, filtering out non-CSV lines.
-                f.write(content + '\n') # Ensure a newline at the end if stripped
-            messagebox.showinfo("Save Successful", f"Output saved to {file_path}")
+            with open(file_path, "w", encoding='utf-8', newline='' if log_type == "host" else None) as f:
+                f.write(content + "\n") # Add newline at end if stripped
+            messagebox.showinfo("Save Successful", f"Log saved to {file_path}")
         except Exception as e:
-            messagebox.showerror("Error Saving File", str(e))
+            messagebox.showerror("Error Saving Log", str(e))
 
-    def clear_output(self):
-        self.output_area.config(state=tk.NORMAL)
-        self.output_area.delete(1.0, tk.END)
-        self.output_area.config(state=tk.DISABLED)
+    def save_both_logs(self):
+        # Save host log
+        host_content = self.host_output_textbox.get("1.0", tk.END).strip()
+        if host_content:
+            file_path_host = filedialog.asksaveasfilename(
+                initialfile=f"host_events_{datetime.datetime.now():%Y%m%d_%H%M%S}.csv",
+                title="Save Host Events Log As...",
+                defaultextension=".csv", filetypes=[("CSV files", "*.csv")]
+            )
+            if file_path_host:
+                try:
+                    with open(file_path_host, "w", encoding='utf-8', newline='') as f:
+                        f.write(host_content + "\n")
+                    messagebox.showinfo("Save Successful", f"Host log saved to {file_path_host}")
+                except Exception as e:
+                    messagebox.showerror("Error Saving Host Log", str(e))
+            else: # User cancelled host save
+                if not messagebox.askyesno("Continue?", "Host log saving cancelled. Continue to save network log?"):
+                    return
+        else:
+            messagebox.showinfo("Save Both", "No host events to save.")
+
+        # Save network log
+        net_content = self.net_output_textbox.get("1.0", tk.END).strip()
+        if net_content:
+            file_path_net = filedialog.asksaveasfilename(
+                initialfile=f"network_traffic_{datetime.datetime.now():%Y%m%d_%H%M%S}.txt",
+                title="Save Network Traffic Log As...",
+                defaultextension=".txt", filetypes=[("Text files", "*.txt")]
+            )
+            if file_path_net:
+                try:
+                    with open(file_path_net, "w", encoding='utf-8') as f:
+                        f.write(net_content + "\n")
+                    messagebox.showinfo("Save Successful", f"Network log saved to {file_path_net}")
+                except Exception as e:
+                    messagebox.showerror("Error Saving Network Log", str(e))
+        else:
+            messagebox.showinfo("Save Both", "No network traffic to save.")
+
+
+    def clear_all_output(self, show_info=True):
+        self._append_to_textbox(self.host_output_textbox, "") # Clear by inserting empty
+        self.host_output_textbox.delete("1.0", tk.END)
+        self._append_to_textbox(self.net_output_textbox, "")
+        self.net_output_textbox.delete("1.0", tk.END)
+        if show_info:
+            messagebox.showinfo("Clear Output", "All output cleared.")
 
     def on_closing(self):
-        if self.is_collecting: # Check self.is_collecting first
-            if messagebox.askyesno("Confirm Exit", "Collection is running. Are you sure you want to exit? This will stop the collection."):
-                self.stop_collection()
-                # Give a moment for stop_collection to attempt cleanup
-                self.root.after(200, self.root.destroy)
+        if self.monitoring_active:
+            if messagebox.askyesno(APP_TITLE, "Monitoring is active. Are you sure you want to quit? This will stop all collectors."):
+                self.stop_collection_logic()
+                # Allow some time for processes to terminate before destroying window
+                self.after(500, self.destroy)
             else:
-                return
+                return # Do not close
         else:
-            self.root.destroy()
+            self.destroy()
 
 if __name__ == "__main__":
-    app_root = tk.Tk()
-    gui = HostMonitorApp(app_root)
-    app_root.mainloop()
+    try:
+        import customtkinter # Check for main GUI lib
+    except ImportError:
+        # Simplified error for missing customtkinter, as it's the core of this UI script.
+        root_check = tk.Tk()
+        root_check.withdraw()
+        messagebox.showerror("Missing Library", "customtkinter is not installed. Please install it via pip.")
+        root_check.destroy()
+        sys.exit(1)
+
+    app = SecurityMonitorApp()
+    app.mainloop()
