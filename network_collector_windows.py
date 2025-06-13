@@ -3,142 +3,181 @@
 import subprocess
 import sys
 import os
-import psutil # To help find a suitable network interface
-import threading # To handle stderr separately if needed
-import datetime # Added for timestamping
-import socket # Added for AF_INET
+import psutil
+import threading
+import datetime
+import socket
+import time # For sleep
 
 # Global variable to store the WinDump process
 windump_process = None
+# Global list to capture initial stderr lines for error checking
+stderr_capture_list = []
+stderr_capture_lock = threading.Lock()
 
 def find_suitable_interface():
     """
     Attempts to find a suitable non-loopback network interface name.
-    WinDump might require an interface number or a specific name format.
-    This function provides a best-effort name.
-    Users might need to adjust this or the WinDump command directly.
+    This is a best-effort heuristic. Manual configuration might be needed.
     """
     try:
-        # Get all network interface addresses
         addrs = psutil.net_if_addrs()
-        # Get interface stats to check if they are up
         stats = psutil.net_if_stats()
-
         candidate_interfaces = []
         for iface_name, iface_addrs in addrs.items():
             if iface_name in stats and stats[iface_name].isup:
-                # Check for a non-loopback IPv4 address
-                for addr in iface_addrs:
-                    if addr.family == psutil.AF_LINK: # Check for MAC address as a proxy for physical interfaces
-                        if not iface_name.lower().startswith("loopback") and not iface_name.lower().startswith("isatap"):
-                             # Prefer interfaces with an IPv4 address
-                            for check_addr in iface_addrs:
-                                if check_addr.family == socket.AF_INET:
-                                    candidate_interfaces.append(iface_name)
-                                    break # Found IPv4, add this interface name
-                            break # Done with this interface name's addresses
+                is_loopback = "loopback" in iface_name.lower() or "isatap" in iface_name.lower()
+                if is_loopback: continue
+
+                has_ipv4 = any(addr.family == socket.AF_INET for addr in iface_addrs)
+                # Prioritize interfaces with IPv4 that seem physical (have a MAC)
+                # This is still a heuristic.
+                has_mac = any(addr.family == psutil.AF_LINK for addr in iface_addrs)
+
+                if has_ipv4 and has_mac : # Good candidate
+                    candidate_interfaces.append(iface_name)
+                elif has_ipv4 and not candidate_interfaces: # Fallback if no MAC interfaces with IPv4 found
+                    candidate_interfaces.append(iface_name)
 
         if candidate_interfaces:
-            # Try to return a name that WinDump might recognize.
-            # This is heuristic. WinDump often uses adapter names from its own enumeration.
-            # For now, return the first plausible candidate.
-            # Example: "Ethernet", "Wi-Fi"
-            # These names from psutil might work with WinDump's -i flag on modern versions.
-            # If WinDump strictly needs numbers, this will require manual adjustment by the user
-            # or parsing `windump -D` output.
-            print(f"Info: Selected interface '{candidate_interfaces[0]}' based on psutil info.", file=sys.stderr)
-            return candidate_interfaces[0]
+            # Prefer shorter names, or names that don't look like GUIDs, if multiple candidates
+            # Simple: just take the first one for now.
+            selected = candidate_interfaces[0]
+            print(f"Info: Heuristically selected interface '{selected}' based on psutil info.", file=sys.stderr)
+            return selected
 
     except Exception as e:
-        print(f"Error finding interface: {e}. WinDump will try its default.", file=sys.stderr)
+        print(f"Error finding interface with psutil: {e}. Will let WinDump try its default.", file=sys.stderr)
 
-    # Fallback: Let WinDump try to pick a default interface or use a common number
-    # If -i is omitted, WinDump often picks the "best" one or fails if multiple are ambiguous.
-    # Using a common default like '1' can be risky if it's not the correct one.
-    print("Info: Could not determine a specific interface, WinDump will use its default or may require manual configuration.", file=sys.stderr)
-    return None # Let WinDump decide, or user can modify to provide a number like "1"
+    print("Info: Could not determine a specific interface via psutil. WinDump will attempt to use its default.", file=sys.stderr)
+    return None
 
+def handle_stderr_thread_func(process, initial_capture_list=None, initial_capture_max_lines=5):
+    """Reads stderr from process, optionally capturing initial lines."""
+    if process and process.stderr:
+        lines_captured = 0
+        for line in iter(process.stderr.readline, ''):
+            if line:
+                line_strip = line.strip()
+                print(f"WinDump STDERR: {line_strip}", file=sys.stderr)
+                sys.stderr.flush()
+                if initial_capture_list is not None and lines_captured < initial_capture_max_lines:
+                    with stderr_capture_lock:
+                        initial_capture_list.append(line_strip)
+                    lines_captured += 1
+        process.stderr.close()
 
-def main():
-    global windump_process
+def start_windump_and_read_stdout(windump_cmd_list):
+    """
+    Launches WinDump with the given command list and reads its stdout.
+    Returns True if WinDump started and ran (even if it exits later),
+    False if it failed immediately with a recognized adapter error.
+    Updates global windump_process.
+    """
+    global windump_process, stderr_capture_list
 
-    # Assumption: WinDump.exe is in PATH and Npcap/WinPcap is installed.
-    windump_cmd = ["windump.exe", "-n", "-l"] # -n: no name resolution, -l: line-buffered
+    stderr_capture_list.clear() # Clear for this attempt
 
-    selected_interface = find_suitable_interface()
-    if selected_interface:
-        # If WinDump on Windows expects interface *names* (like "Ethernet 0")
-        # this might work. If it expects *numbers* from `windump -D`, this will fail
-        # and the user would need to manually set the interface (e.g. by number).
-        windump_cmd.extend(["-i", selected_interface])
-    else:
-        print("Warning: No specific interface provided to WinDump. It will use its default.", file=sys.stderr)
-        # Alternatively, could try with a common interface number, e.g. # windump_cmd.extend(["-i", "1"])
-        # But this is a guess and might not be correct.
-
-    print(f"[{datetime.datetime.now().isoformat()}] network_collector_windows.py: Starting WinDump with command: {' '.join(windump_cmd)}", file=sys.stderr)
+    print(f"[{datetime.datetime.now().isoformat()}] Attempting to start WinDump with command: {' '.join(windump_cmd_list)}", file=sys.stderr)
     sys.stderr.flush()
 
     try:
-        # CREATE_NO_WINDOW flag prevents WinDump console from appearing
         windump_process = subprocess.Popen(
-            windump_cmd,
+            windump_cmd_list,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, # Capture stderr to avoid polluting its own stdout
+            stderr=subprocess.PIPE,
             text=True,
-            bufsize=1, # Line buffered
+            bufsize=1,
             universal_newlines=True,
             creationflags=subprocess.CREATE_NO_WINDOW
         )
 
-        # Thread to print WinDump's stderr to this script's stderr (for debugging)
-        def handle_stderr():
-            if windump_process and windump_process.stderr:
-                for line in iter(windump_process.stderr.readline, ''):
-                    if line:
-                        print(f"WinDump STDERR: {line.strip()}", file=sys.stderr)
-                        sys.stderr.flush()
-
-        stderr_thread = threading.Thread(target=handle_stderr, daemon=True)
+        stderr_thread = threading.Thread(target=handle_stderr_thread_func, args=(windump_process, stderr_capture_list), daemon=True)
         stderr_thread.start()
 
-        # Read from WinDump's stdout and print to this script's stdout
+        # Brief pause to see if WinDump fails immediately
+        time.sleep(2.0) # Wait 2 seconds
+
+        if windump_process.poll() is not None: # Process has terminated
+            # Check if it's the adapter error
+            with stderr_capture_lock:
+                for err_line in stderr_capture_list:
+                    if "Error opening adapter" in err_line or "The system cannot find the device specified" in err_line:
+                        print(f"WinDump failed to start with command {' '.join(windump_cmd_list)} due to adapter error.", file=sys.stderr)
+                        return False # Signal failure for fallback
+            # Some other early exit error
+            print(f"WinDump exited quickly with code {windump_process.returncode}. Command: {' '.join(windump_cmd_list)}", file=sys.stderr)
+            return False # Signal failure
+
+        # If process is still running, it likely started OK.
+        print(f"WinDump started successfully with command: {' '.join(windump_cmd_list)}", file=sys.stderr)
         if windump_process.stdout:
             for line in iter(windump_process.stdout.readline, ''):
                 if line:
-                    sys.stdout.write(line) # Write directly, line already has newline
+                    sys.stdout.write(line)
                     sys.stdout.flush()
             windump_process.stdout.close()
 
-        # Wait for the process to complete (shouldn't happen unless error or Ctrl+C)
-        windump_process.wait()
-        if windump_process.returncode != 0 and windump_process.returncode is not None : # None if terminated by signal
-             print(f"WinDump process exited with error code {windump_process.returncode}", file=sys.stderr)
-
+        windump_process.wait() # Wait for it to finish (e.g. if main loop is exited by external signal)
+        if windump_process.returncode != 0 and windump_process.returncode is not None:
+             print(f"WinDump process (cmd: {' '.join(windump_cmd_list)}) exited with error code {windump_process.returncode}", file=sys.stderr)
+        return True # Ran successfully or exited normally after running
 
     except FileNotFoundError:
-        print("Error: WinDump.exe not found. Please ensure it is installed and in your system PATH.", file=sys.stderr)
-        sys.stderr.flush()
+        print(f"Error: {windump_cmd_list[0]} not found. Please ensure WinDump is installed and in PATH.", file=sys.stderr)
+        return False # Critical failure
+    except Exception as e:
+        print(f"An unexpected error occurred while trying to run WinDump ({' '.join(windump_cmd_list)}): {e}", file=sys.stderr)
+        return False # Critical failure
+
+def main():
+    global windump_process
+
+    # --- Attempt 1: With psutil-derived interface name ---
+    base_windump_cmd = ["windump.exe", "-n", "-l"]
+    windump_cmd_attempt1 = list(base_windump_cmd) # Make a copy
+
+    selected_interface = find_suitable_interface()
+    if selected_interface:
+        windump_cmd_attempt1.extend(["-i", selected_interface])
+        # If find_suitable_interface returned None, windump_cmd_attempt1 will not have -i,
+        # effectively making it same as attempt 2. So, only try specific if selected.
+
+        if start_windump_and_read_stdout(windump_cmd_attempt1):
+            return # Success or normal exit
+
+        # If we are here, start_windump_and_read_stdout returned False, meaning an adapter error.
+        print("Info: First attempt to run WinDump with selected interface failed. Trying WinDump default.", file=sys.stderr)
+    else:
+        # find_suitable_interface returned None, so proceed directly to default.
+        print("Info: No specific interface selected by psutil. Proceeding with WinDump default.", file=sys.stderr)
+
+
+    # --- Attempt 2: Without -i (WinDump default) ---
+    # This command will be just ["windump.exe", "-n", "-l"]
+    windump_cmd_attempt2 = list(base_windump_cmd)
+    if start_windump_and_read_stdout(windump_cmd_attempt2):
+        return # Success or normal exit
+
+    # If both attempts fail
+    print("Error: WinDump failed to start with both selected interface and default settings.", file=sys.stderr)
+    print("Please try running 'windump -D' in a command prompt to list available interfaces, "
+          "then manually edit this script (network_collector_windows.py) to specify the correct interface number or name for the '-i' flag.", file=sys.stderr)
+    sys.stderr.flush()
+
+
+if __name__ == "__main__":
+    try:
+        main()
     except KeyboardInterrupt:
         print(f"[{datetime.datetime.now().isoformat()}] network_collector_windows.py: Stopping due to KeyboardInterrupt.", file=sys.stderr)
-        sys.stderr.flush()
-    except Exception as e:
-        print(f"[{datetime.datetime.now().isoformat()}] network_collector_windows.py: An unexpected error occurred: {e}", file=sys.stderr)
-        sys.stderr.flush()
     finally:
         if windump_process and windump_process.poll() is None:
             print(f"[{datetime.datetime.now().isoformat()}] network_collector_windows.py: Terminating WinDump process.", file=sys.stderr)
-            sys.stderr.flush()
             windump_process.terminate()
             try:
-                windump_process.wait(timeout=5) # Wait for graceful termination
+                windump_process.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                print(f"[{datetime.datetime.now().isoformat()}] network_collector_windows.py: WinDump did not terminate gracefully, killing.", file=sys.stderr)
                 windump_process.kill()
         print(f"[{datetime.datetime.now().isoformat()}] network_collector_windows.py: Exiting.", file=sys.stderr)
         sys.stderr.flush()
-
-if __name__ == "__main__":
-    # import datetime # Ensure datetime is available in main's scope if not already - already imported
-    # import socket # For AF_INET in find_suitable_interface - already imported
-    main()
