@@ -9,6 +9,7 @@ import queue
 import sys
 import os
 import datetime
+import re # For parsing tshark -D output
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -40,6 +41,8 @@ class SecurityMonitorApp(ctk.CTk):
         self.host_output_queue = queue.Queue()
         self.net_output_queue = queue.Queue()
         self.monitoring_active = False
+
+        self.tshark_interfaces_map = {} # To map display names to actual identifiers
 
         self.grid_rowconfigure(0, weight=0)
         self.grid_rowconfigure(1, weight=0)
@@ -81,12 +84,21 @@ class SecurityMonitorApp(ctk.CTk):
         self.control_panel_row2.grid(row=1, column=0, sticky="ew", padx=10, pady=(0,5))
         self.control_panel_row2.grid_columnconfigure(0, weight=0)
         self.control_panel_row2.grid_columnconfigure(1, weight=1)
+        self.control_panel_row2.grid_columnconfigure(2, weight=0) # For Refresh button
 
-        self.tshark_interface_label = ctk.CTkLabel(self.control_panel_row2, text="TShark Interface (e.g., '3' or name, optional):")
+        self.tshark_interface_label = ctk.CTkLabel(self.control_panel_row2, text="TShark Interface:")
         self.tshark_interface_label.grid(row=0, column=0, padx=(5,2), pady=5, sticky="w")
 
-        self.tshark_interface_entry = ctk.CTkEntry(self.control_panel_row2, placeholder_text="Leave blank for auto-detect")
-        self.tshark_interface_entry.grid(row=0, column=1, padx=(0,10), pady=5, sticky="ew")
+        self.tshark_interface_combobox = ctk.CTkComboBox(
+            self.control_panel_row2, values=["Loading interfaces..."], state="readonly"
+        )
+        self.tshark_interface_combobox.grid(row=0, column=1, padx=(0,5), pady=5, sticky="ew")
+
+        self.refresh_interfaces_button = ctk.CTkButton(
+            self.control_panel_row2, text="Refresh", width=80,
+            command=self.populate_tshark_interfaces_combobox
+        )
+        self.refresh_interfaces_button.grid(row=0, column=2, padx=(0,10), pady=5, sticky="e")
 
         self.tab_view = ctk.CTkTabview(self, corner_radius=8)
         self.tab_view.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
@@ -106,8 +118,102 @@ class SecurityMonitorApp(ctk.CTk):
         self.status_bar = ctk.CTkLabel(self, text="Status: Stopped", text_color="red", anchor="w")
         self.status_bar.grid(row=3, column=0, sticky="ew", padx=10, pady=(5,10))
 
+        self.populate_tshark_interfaces_combobox() # Initial population
         self.after(100, self.process_queues)
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def get_tshark_interfaces(self):
+        \"\"\"Runs 'tshark -D' and parses its output to get a map of interface display names to identifiers.\"\"\"
+        interfaces_map = {}
+        try:
+            proc = subprocess.run(
+                ["tshark.exe", "-D"], capture_output=True, text=True, check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW, encoding='utf-8'
+            )
+            if proc.returncode != 0:
+                error_msg = f"'tshark -D' failed. STDERR: {proc.stderr.strip() if proc.stderr else 'Unknown error'}"
+                self.net_output_queue.put(f"[main_ui.py ERROR] {error_msg}\\n")
+                # messagebox.showwarning("TShark Interfaces", f"Could not list TShark interfaces. {error_msg}")
+                return {"Error: Could not list (tshark -D failed)": ""}
+
+            output = proc.stdout.strip()
+            if not output:
+                self.net_output_queue.put("[main_ui.py WARNING] 'tshark -D' returned no interfaces.\\n")
+                return {"No interfaces found": ""}
+
+            # Using a more specific regex to capture number and the rest of the line
+            # The identifier for -i can be the number, or the full device name string
+            # TShark on Windows often prefers the number or the "\Device\NPF_{GUID}" string.
+            for line in output.splitlines():
+                line = line.strip()
+                match = re.match(r"(\d+)\.\s+(.+)", line) # Number followed by dot, space, then the rest
+                if match:
+                    number = match.group(1)
+                    full_description = match.group(2) # This includes \Device\NPF... and (Friendly Name)
+
+                    # Try to extract a more friendly name for display, if possible
+                    friendly_name_match = re.search(r"\((.+)\)", full_description)
+                    display_name_suffix = friendly_name_match.group(1) if friendly_name_match else full_description
+
+                    # The identifier for TShark -i is often the number.
+                    # Sometimes, especially for non-Ethernet/Wi-Fi, it might be the full name or \Device... string.
+                    # For robustness with -i, the number is usually safest if TShark lists it.
+                    # If only names are listed (no numbers), then name is used.
+                    # We'll store the number as the primary identifier if available.
+                    identifier_for_tshark = number
+
+                    # If the full_description contains a \Device\NPF_ style string, that's often a good identifier too.
+                    npf_match = re.search(r"(\\Device\\NPF_\{[\w-]+\})", full_description)
+                    if npf_match:
+                        identifier_for_tshark = npf_match.group(1) # Prefer NPF device path if available
+                        if not friendly_name_match : # If no friendly name in parens, use the NPF path as part of display name
+                             display_name_suffix = identifier_for_tshark
+
+                    display_text = f"{number}. {display_name_suffix}"
+                    interfaces_map[display_text] = identifier_for_tshark
+
+            if not interfaces_map:
+                 return {"No parsable interfaces found": ""}
+            return interfaces_map
+
+        except FileNotFoundError:
+            self.net_output_queue.put("[main_ui.py ERROR] tshark.exe not found. Cannot list interfaces.\\n")
+            messagebox.showerror("TShark Error", "tshark.exe not found. Please ensure Wireshark is installed and TShark is in the system PATH.")
+            return {"Error: tshark.exe not found": ""}
+        except Exception as e:
+            self.net_output_queue.put(f"[main_ui.py ERROR] Error getting TShark interfaces: {e}\\n")
+            messagebox.showerror("TShark Error", f"Error getting TShark interfaces: {e}")
+            return {f"Error: {str(e)[:100]}": ""} # Truncate long errors
+
+    def populate_tshark_interfaces_combobox(self):
+        \"\"\"Fetches interfaces and updates the combobox.\"\"\"
+        self.tshark_interface_combobox.configure(values=["Loading..."], state="readonly")
+        self.tshark_interface_combobox.set("Loading...")
+        # Force UI update for "Loading..."
+        self.update_idletasks()
+
+
+        self.tshark_interfaces_map = self.get_tshark_interfaces()
+
+        if self.tshark_interfaces_map:
+            combobox_values = list(self.tshark_interfaces_map.keys())
+            # Check if the first value indicates an error or no interfaces
+            is_error_or_empty = False
+            if combobox_values:
+                first_val_lower = combobox_values[0].lower()
+                if "error:" in first_val_lower or "no interfaces" in first_val_lower or "failed to load" in first_val_lower :
+                    is_error_or_empty = True
+
+            if combobox_values and not is_error_or_empty:
+                self.tshark_interface_combobox.configure(values=combobox_values, state="readonly")
+                self.tshark_interface_combobox.set(combobox_values[0])
+            else:
+                self.tshark_interface_combobox.configure(values=combobox_values if combobox_values else ["No interfaces found"], state="disabled")
+                self.tshark_interface_combobox.set(combobox_values[0] if combobox_values else "No interfaces found")
+        else:
+            self.tshark_interface_combobox.configure(values=["Failed to load interfaces"], state="disabled")
+            self.tshark_interface_combobox.set("Failed to load interfaces")
+
 
     def _reader_thread(self, proc, queue_obj, tab_name_for_error_logging):
         try:
@@ -117,7 +223,7 @@ class SecurityMonitorApp(ctk.CTk):
                     if not self.monitoring_active and (proc.poll() is not None): break
                 proc.stdout.close()
         except Exception as e:
-            queue_obj.put(f"Error reading from {tab_name_for_error_logging}: {e}\n")
+            queue_obj.put(f"Error reading from {tab_name_for_error_logging}: {e}\\n")
         finally:
             queue_obj.put(None)
 
@@ -142,7 +248,8 @@ class SecurityMonitorApp(ctk.CTk):
         self.save_host_log_button.configure(state=tk.DISABLED)
         self.save_net_log_button.configure(state=tk.DISABLED)
         self.save_both_button.configure(state=tk.DISABLED)
-        self.tshark_interface_entry.configure(state=tk.DISABLED)
+        self.tshark_interface_combobox.configure(state=tk.DISABLED)
+        self.refresh_interfaces_button.configure(state=tk.DISABLED)
 
         try:
             host_cmd = [sys.executable, HOST_COLLECTOR_SCRIPT_PATH]
@@ -154,13 +261,16 @@ class SecurityMonitorApp(ctk.CTk):
             threading.Thread(target=self._log_subprocess_stderr, args=(self.host_collector_proc, self.host_output_queue, "Host Collector"), daemon=True).start()
 
             net_cmd = [sys.executable, NET_COLLECTOR_SCRIPT_PATH]
-            tshark_interface_val = self.tshark_interface_entry.get().strip()
-            if tshark_interface_val:
-                net_cmd.extend(["--interface", tshark_interface_val])
 
-            # --- Add logging for the constructed net_cmd ---
-            self.net_output_queue.put(f"[main_ui.py DEBUG] Launching Network Collector with command: {' '.join(net_cmd)}\n")
-            # --- End of logging addition ---
+            selected_display_name = self.tshark_interface_combobox.get()
+            tshark_identifier = self.tshark_interfaces_map.get(selected_display_name) # Get actual ID from map
+
+            # Only add --interface if a valid identifier was resolved
+            if tshark_identifier and not ("Error:" in selected_display_name or "No interfaces" in selected_display_name or "Failed to load" in selected_display_name or not tshark_identifier.strip()):
+                net_cmd.extend(["--interface", tshark_identifier])
+            # Else, network_collector_windows.py will use its internal auto-detection/default logic.
+
+            self.net_output_queue.put(f"[main_ui.py DEBUG] Launching Network Collector with command: {' '.join(net_cmd)}\\n")
 
             self.net_collector_proc = subprocess.Popen(
                 net_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
@@ -176,13 +286,16 @@ class SecurityMonitorApp(ctk.CTk):
     def _log_subprocess_stderr(self, proc, queue_obj, name):
         if proc and proc.stderr:
             for line in iter(proc.stderr.readline, ''):
-                if line: queue_obj.put(f"[{name} STDERR] {line.strip()}\n")
+                if line: queue_obj.put(f"[{name} STDERR] {line.strip()}\\n")
             proc.stderr.close()
 
     def stop_collection_logic(self, force_ui_update=False):
         if not self.monitoring_active and not force_ui_update: return
         self.monitoring_active = False
-        self.tshark_interface_entry.configure(state=tk.NORMAL)
+        if hasattr(self, 'tshark_interface_combobox'):
+             self.tshark_interface_combobox.configure(state="readonly")
+        if hasattr(self, 'refresh_interfaces_button'):
+            self.refresh_interfaces_button.configure(state=tk.NORMAL)
 
         procs_to_terminate = []
         if self.host_collector_proc and self.host_collector_proc.poll() is None: procs_to_terminate.append(self.host_collector_proc)
@@ -192,7 +305,7 @@ class SecurityMonitorApp(ctk.CTk):
             try: proc.terminate()
             except Exception as e:
                 proc_name = proc.args[1] if proc.args and len(proc.args) > 1 else "collector script"
-                self.host_output_queue.put(f"Error terminating {proc_name}: {e}\n")
+                self.host_output_queue.put(f"Error terminating {proc_name}: {e}\\n")
 
         for proc in procs_to_terminate:
             try: proc.wait(timeout=1.0)
@@ -213,7 +326,7 @@ class SecurityMonitorApp(ctk.CTk):
             while True:
                 line = self.host_output_queue.get_nowait()
                 if line is None:
-                    if self.monitoring_active: self._append_to_textbox(self.host_output_textbox, "[Host collector stream ended unexpectedly]\n")
+                    if self.monitoring_active: self._append_to_textbox(self.host_output_textbox, "[Host collector stream ended unexpectedly]\\n")
                     break
                 self._append_to_textbox(self.host_output_textbox, line)
         except queue.Empty: pass
@@ -222,7 +335,7 @@ class SecurityMonitorApp(ctk.CTk):
             while True:
                 line = self.net_output_queue.get_nowait()
                 if line is None:
-                    if self.monitoring_active: self._append_to_textbox(self.net_output_textbox, "[Network collector (TShark) stream ended unexpectedly]\n")
+                    if self.monitoring_active: self._append_to_textbox(self.net_output_textbox, "[Network collector (TShark) stream ended unexpectedly]\\n")
                     break
                 self._append_to_textbox(self.net_output_textbox, line)
         except queue.Empty: pass
@@ -261,7 +374,7 @@ class SecurityMonitorApp(ctk.CTk):
         if not file_path: return
         try:
             with open(file_path, "w", encoding='utf-8', newline='' if log_type == "host" else None) as f:
-                f.write(content + "\n")
+                f.write(content + "\\n")
             messagebox.showinfo("Save Successful", f"Log saved to {file_path}")
         except Exception as e: messagebox.showerror("Error Saving Log", str(e))
 
@@ -274,7 +387,7 @@ class SecurityMonitorApp(ctk.CTk):
             )
             if file_path_host:
                 try:
-                    with open(file_path_host, "w", encoding='utf-8', newline='') as f: f.write(host_content + "\n")
+                    with open(file_path_host, "w", encoding='utf-8', newline='') as f: f.write(host_content + "\\n")
                     messagebox.showinfo("Save Successful", f"Host log saved to {file_path_host}")
                 except Exception as e: messagebox.showerror("Error Saving Host Log", str(e))
             else:
@@ -289,7 +402,7 @@ class SecurityMonitorApp(ctk.CTk):
             )
             if file_path_net:
                 try:
-                    with open(file_path_net, "w", encoding='utf-8') as f: f.write(net_content + "\n")
+                    with open(file_path_net, "w", encoding='utf-8') as f: f.write(net_content + "\\n")
                     messagebox.showinfo("Save Successful", f"Network log saved to {file_path_net}")
                 except Exception as e: messagebox.showerror("Error Saving Network Log", str(e))
         else: messagebox.showinfo("Save Both", "No network traffic (TShark) to save.")
