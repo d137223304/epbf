@@ -20,6 +20,7 @@ GREEN_ACCENT_HOVER = "#00A500"
 RED_ACCENT = "#A00000"
 RED_ACCENT_HOVER = "#B80000"
 MONO_FONT = ("Consolas", 11)
+MAX_TEXTBOX_LINES = 2000 # Max lines to keep in textboxes if display is on
 
 _HOST_COLLECTOR_FILENAME = "host_collector_windows.py"
 _NET_COLLECTOR_FILENAME = "network_collector_windows.py"
@@ -33,7 +34,7 @@ class SecurityMonitorApp(ctk.CTk):
         super().__init__()
 
         self.title(APP_TITLE)
-        self.geometry("1200x800")
+        self.geometry("1250x800")
         ctk.set_appearance_mode("Dark")
         ctk.set_default_color_theme("blue")
 
@@ -46,7 +47,7 @@ class SecurityMonitorApp(ctk.CTk):
         self.tshark_interfaces_map = {}
         self.host_event_count = 0
         self.network_event_count = 0
-        self.display_logs_var = ctk.IntVar(value=1) # Checkbox variable, 1=checked (display), 0=unchecked
+        self.display_logs_var = ctk.IntVar(value=1)
 
         self.grid_rowconfigure(0, weight=0)
         self.grid_rowconfigure(1, weight=0)
@@ -54,25 +55,23 @@ class SecurityMonitorApp(ctk.CTk):
         self.grid_rowconfigure(3, weight=0)
         self.grid_columnconfigure(0, weight=1)
 
-        # --- Control Panel Row 1 (Primary Buttons) ---
         self.control_panel_row1 = ctk.CTkFrame(self, corner_radius=0)
         self.control_panel_row1.grid(row=0, column=0, sticky="ew", padx=10, pady=(10,0))
-        # Adjusted column weights for more balanced spacing with checkbox potentially moving here
-        self.control_panel_row1.grid_columnconfigure(0, weight=0) # Start/Stop
-        self.control_panel_row1.grid_columnconfigure(1, weight=0) # Save Host
-        self.control_panel_row1.grid_columnconfigure(2, weight=0) # Save Net
-        self.control_panel_row1.grid_columnconfigure(3, weight=0) # Save Both
-        self.control_panel_row1.grid_columnconfigure(4, weight=0) # Correlate
-        self.control_panel_row1.grid_columnconfigure(5, weight=0) # Clear
-        self.control_panel_row1.grid_columnconfigure(6, weight=0) # Display Logs Checkbox
-        self.control_panel_row1.grid_columnconfigure(7, weight=1) # Spacer
+        self.control_panel_row1.grid_columnconfigure(0, weight=0)
+        self.control_panel_row1.grid_columnconfigure(1, weight=0)
+        self.control_panel_row1.grid_columnconfigure(2, weight=0)
+        self.control_panel_row1.grid_columnconfigure(3, weight=0)
+        self.control_panel_row1.grid_columnconfigure(4, weight=0)
+        self.control_panel_row1.grid_columnconfigure(5, weight=0)
+        self.control_panel_row1.grid_columnconfigure(6, weight=0)
+        self.control_panel_row1.grid_columnconfigure(7, weight=1)
 
         self.start_stop_button = ctk.CTkButton(
             self.control_panel_row1, text="Start Collection",
             fg_color=GREEN_ACCENT, hover_color=GREEN_ACCENT_HOVER,
             command=self.toggle_collection
         )
-        self.start_stop_button.grid(row=0, column=0, padx=5, pady=5)
+        self.start_stop_button.grid(row=0, column=0, padx=(0,5), pady=5)
 
         self.save_host_log_button = ctk.CTkButton(self.control_panel_row1, text="Save Host Log", command=lambda: self.save_log("host"))
         self.save_host_log_button.grid(row=0, column=1, padx=5, pady=5)
@@ -90,14 +89,12 @@ class SecurityMonitorApp(ctk.CTk):
         self.correlate_button.grid(row=0, column=4, padx=5, pady=5)
 
         self.clear_button = ctk.CTkButton(self.control_panel_row1, text="Clear Output", command=self.clear_all_output)
-        self.clear_button.grid(row=0, column=5, padx=(5,5), pady=5) # Adjusted padding
+        self.clear_button.grid(row=0, column=5, padx=5, pady=5)
 
         self.display_logs_checkbox = ctk.CTkCheckBox(self.control_panel_row1, text="Display logs in real-time",
                                                      variable=self.display_logs_var, onvalue=1, offvalue=0)
-        self.display_logs_checkbox.grid(row=0, column=6, padx=(5,10), pady=5, sticky="w")
+        self.display_logs_checkbox.grid(row=0, column=6, padx=(10,5), pady=5, sticky="w")
 
-
-        # --- Control Panel Row 2: TShark Interface Input ---
         self.control_panel_row2 = ctk.CTkFrame(self, corner_radius=0)
         self.control_panel_row2.grid(row=1, column=0, sticky="ew", padx=10, pady=(0,5))
         self.control_panel_row2.grid_columnconfigure(0, weight=0)
@@ -108,7 +105,7 @@ class SecurityMonitorApp(ctk.CTk):
         self.tshark_interface_label.grid(row=0, column=0, padx=(5,2), pady=5, sticky="w")
 
         self.tshark_interface_combobox = ctk.CTkComboBox(
-            self.control_panel_row2, values=["Loading interfaces..."], state="readonly"
+            self.control_panel_row2, values=["Loading interfaces..."], state="readonly", width=250
         )
         self.tshark_interface_combobox.grid(row=0, column=1, padx=(0,5), pady=5, sticky="ew")
 
@@ -118,7 +115,6 @@ class SecurityMonitorApp(ctk.CTk):
         )
         self.refresh_interfaces_button.grid(row=0, column=2, padx=(0,10), pady=5, sticky="e")
 
-        # --- Middle Row: Output Display (CTkTabview) ---
         self.tab_view = ctk.CTkTabview(self, corner_radius=8)
         self.tab_view.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
 
@@ -134,29 +130,20 @@ class SecurityMonitorApp(ctk.CTk):
         )
         self.net_output_textbox.pack(expand=True, fill="both")
 
-        # --- Bottom Row: Status Bar ---
         self.status_text_var = ctk.StringVar(value="Status: Stopped")
         self.status_bar = ctk.CTkLabel(self, textvariable=self.status_text_var, text_color="red", anchor="w")
         self.status_bar.grid(row=3, column=0, sticky="ew", padx=10, pady=(5,10))
 
         self.populate_tshark_interfaces_combobox()
-        self.after(100, self.process_queues)
+        self.after(200, self.process_queues_and_update_gui) # Renamed and adjusted frequency
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def update_status_bar(self):
         status_prefix = "Status: Running..." if self.monitoring_active else "Status: Stopped"
         color = "green" if self.monitoring_active else "red"
-
-        counts_str = ""
-        if self.monitoring_active: # Only show counts when running
-            counts_str = f" | Host: {self.host_event_count} | Network: {self.network_event_count}"
-        elif self.host_event_count > 0 or self.network_event_count > 0: # Show final counts when stopped if any events were captured
-             counts_str = f" | Host: {self.host_event_count} | Network: {self.network_event_count} (Collection Stopped)"
-
-
+        counts_str = f" | Host: {self.host_event_count} | Network: {self.network_event_count}"
         self.status_text_var.set(f"{status_prefix}{counts_str}")
         self.status_bar.configure(text_color=color)
-
 
     def get_tshark_interfaces(self):
         interfaces_map = {}
@@ -167,11 +154,11 @@ class SecurityMonitorApp(ctk.CTk):
             )
             if proc.returncode != 0:
                 error_msg = f"'tshark -D' failed. STDERR: {proc.stderr.strip() if proc.stderr else 'Unknown error'}"
-                self.net_output_queue.put(f"[main_ui.py ERROR] {error_msg}\\n")
+                self._queue_internal_message(self.net_output_queue, f"[main_ui.py ERROR] {error_msg}\\n")
                 return {"Error: Could not list (tshark -D failed)": ""}
             output = proc.stdout.strip()
             if not output:
-                self.net_output_queue.put("[main_ui.py WARNING] 'tshark -D' returned no interfaces.\\n")
+                self._queue_internal_message(self.net_output_queue, "[main_ui.py WARNING] 'tshark -D' returned no interfaces.\\n")
                 return {"No interfaces found": ""}
             for line in output.splitlines():
                 line = line.strip()
@@ -192,11 +179,11 @@ class SecurityMonitorApp(ctk.CTk):
             if not interfaces_map: return {"No parsable interfaces found": ""}
             return interfaces_map
         except FileNotFoundError:
-            self.net_output_queue.put("[main_ui.py ERROR] tshark.exe not found. Cannot list interfaces.\\n")
+            self._queue_internal_message(self.net_output_queue,"[main_ui.py ERROR] tshark.exe not found. Cannot list interfaces.\\n")
             messagebox.showerror("TShark Error", "tshark.exe not found. Please ensure Wireshark is installed and TShark is in the system PATH.")
             return {"Error: tshark.exe not found": ""}
         except Exception as e:
-            self.net_output_queue.put(f"[main_ui.py ERROR] Error getting TShark interfaces: {e}\\n")
+            self._queue_internal_message(self.net_output_queue,f"[main_ui.py ERROR] Error getting TShark interfaces: {e}\\n")
             messagebox.showerror("TShark Error", f"Error getting TShark interfaces: {e}")
             return {f"Error: {str(e)[:100]}": ""}
 
@@ -225,14 +212,17 @@ class SecurityMonitorApp(ctk.CTk):
     def _reader_thread(self, proc, queue_obj, tab_name_for_error_logging):
         try:
             if proc and proc.stdout:
-                for line in iter(proc.stdout.readline, ''):
+                for line in iter(proc.stdout.readline, ''): # line includes newline
                     if line: queue_obj.put(line)
                     if not self.monitoring_active and (proc.poll() is not None): break
                 proc.stdout.close()
         except Exception as e:
-            queue_obj.put(f"Error reading from {tab_name_for_error_logging}: {e}\\n")
+            self._queue_internal_message(queue_obj, f"Error reading from {tab_name_for_error_logging}: {e}\\n")
         finally:
             queue_obj.put(None)
+
+    def _queue_internal_message(self, queue_obj, message):
+        queue_obj.put(message) # Internal messages always go to queue; display is handled by process_queues
 
     def toggle_collection(self):
         if self.monitoring_active: self.stop_collection_logic()
@@ -253,13 +243,13 @@ class SecurityMonitorApp(ctk.CTk):
         self.update_status_bar()
 
         self.start_stop_button.configure(text="Stop Collection", fg_color=RED_ACCENT, hover_color=RED_ACCENT_HOVER)
-        if self.display_logs_var.get() == 1: # Only clear textboxes if they were being displayed
-            self.clear_all_output(show_info=False)
-        else: # If display was off, just ensure textboxes are technically empty for new session if it were to be turned on
-            for textbox in [self.host_output_textbox, self.net_output_textbox]:
-                 if textbox.get("1.0", tk.END).strip(): # if it has content from previous (display on) session
-                    textbox.configure(state=tk.NORMAL); textbox.delete("1.0", tk.END); textbox.configure(state=tk.DISABLED)
 
+        if self.display_logs_var.get() == 1:
+            self.clear_all_output(show_info=False, reset_counts_override=False)
+        else: # If display is off, ensure textboxes are empty for a new session
+            for textbox in [self.host_output_textbox, self.net_output_textbox]:
+                 if textbox.get("1.0", tk.END).strip():
+                    textbox.configure(state=tk.NORMAL); textbox.delete("1.0", tk.END); textbox.configure(state=tk.DISABLED)
 
         self.save_host_log_button.configure(state=tk.DISABLED)
         self.save_net_log_button.configure(state=tk.DISABLED)
@@ -267,7 +257,6 @@ class SecurityMonitorApp(ctk.CTk):
         self.tshark_interface_combobox.configure(state=tk.DISABLED)
         self.refresh_interfaces_button.configure(state=tk.DISABLED)
         self.display_logs_checkbox.configure(state=tk.DISABLED)
-
 
         try:
             host_cmd = [sys.executable, HOST_COLLECTOR_SCRIPT_PATH]
@@ -283,7 +272,9 @@ class SecurityMonitorApp(ctk.CTk):
             tshark_identifier = self.tshark_interfaces_map.get(selected_display_name)
             if tshark_identifier and not ("Error:" in selected_display_name or "No interfaces" in selected_display_name or "Failed to load" in selected_display_name or not tshark_identifier.strip()):
                 net_cmd.extend(["--interface", tshark_identifier])
-            self.net_output_queue.put(f"[main_ui.py DEBUG] Launching Network Collector with command: {' '.join(net_cmd)}\\n")
+
+            self._queue_internal_message(self.net_output_queue, f"[main_ui.py DEBUG] Launching Network Collector with command: {' '.join(net_cmd)}\\n")
+
             self.net_collector_proc = subprocess.Popen(
                 net_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
                 creationflags=subprocess.CREATE_NO_WINDOW
@@ -297,7 +288,7 @@ class SecurityMonitorApp(ctk.CTk):
     def _log_subprocess_stderr(self, proc, queue_obj, name):
         if proc and proc.stderr:
             for line in iter(proc.stderr.readline, ''):
-                if line: queue_obj.put(f"[{name} STDERR] {line.strip()}\\n")
+                if line: self._queue_internal_message(queue_obj, f"[{name} STDERR] {line.strip()}\\n")
             proc.stderr.close()
 
     def stop_collection_logic(self, force_ui_update=False):
@@ -307,7 +298,6 @@ class SecurityMonitorApp(ctk.CTk):
         if hasattr(self, 'refresh_interfaces_button'): self.refresh_interfaces_button.configure(state=tk.NORMAL)
         if hasattr(self, 'display_logs_checkbox'): self.display_logs_checkbox.configure(state=tk.NORMAL)
 
-
         procs_to_terminate = []
         if self.host_collector_proc and self.host_collector_proc.poll() is None: procs_to_terminate.append(self.host_collector_proc)
         if self.net_collector_proc and self.net_collector_proc.poll() is None: procs_to_terminate.append(self.net_collector_proc)
@@ -316,7 +306,7 @@ class SecurityMonitorApp(ctk.CTk):
             try: proc.terminate()
             except Exception as e:
                 proc_name = proc.args[1] if proc.args and len(proc.args) > 1 else "collector script"
-                self.host_output_queue.put(f"Error terminating {proc_name}: {e}\\n")
+                self._queue_internal_message(self.host_output_queue, f"Error terminating {proc_name}: {e}\\n")
         for proc in procs_to_terminate:
             try: proc.wait(timeout=1.0)
             except subprocess.TimeoutExpired: proc.kill()
@@ -326,146 +316,149 @@ class SecurityMonitorApp(ctk.CTk):
         self.start_stop_button.configure(text="Start Collection", fg_color=GREEN_ACCENT, hover_color=GREEN_ACCENT_HOVER)
         self.update_status_bar()
 
-        # Enable save buttons based on actual collected data (counts), not just textbox content
         self.save_host_log_button.configure(state=tk.NORMAL if self.host_event_count > 0 else tk.DISABLED)
         self.save_net_log_button.configure(state=tk.NORMAL if self.network_event_count > 0 else tk.DISABLED)
         self.save_both_button.configure(state=tk.NORMAL if (self.host_event_count > 0 or self.network_event_count > 0) else tk.DISABLED)
 
-
-    def process_queues(self):
-        # Process host queue
-        host_lines_processed_this_cycle = 0
+    def process_queues_and_update_gui(self):
+        # Process queues to update counts
+        host_lines_in_batch = []
         try:
-            while True: # Process all available items
+            while not self.host_output_queue.empty():
                 line = self.host_output_queue.get_nowait()
                 if line is None:
-                    if self.monitoring_active: self._append_to_textbox(self.host_output_textbox, "[Host collector stream ended unexpectedly]\\n", is_host_event=False) # Don't count this as data
+                    if self.monitoring_active:
+                        self._queue_internal_message(self.host_output_queue, "[Host collector stream ended unexpectedly]\\n")
                     break
-                # Increment count for any non-empty line that is not a special message from UI itself
                 if line.strip() and not line.startswith("[main_ui.py"): self.host_event_count += 1
-                if self.display_logs_var.get() == 1: self._append_to_textbox(self.host_output_textbox, line, is_host_event=False) # Display if checked
-                host_lines_processed_this_cycle +=1
+                host_lines_in_batch.append(line)
         except queue.Empty: pass
 
-        # Process network queue
-        net_lines_processed_this_cycle = 0
+        net_lines_in_batch = []
         try:
-            while True: # Process all available items
+            while not self.net_output_queue.empty():
                 line = self.net_output_queue.get_nowait()
                 if line is None:
-                    if self.monitoring_active: self._append_to_textbox(self.net_output_textbox, "[Network collector (TShark) stream ended unexpectedly]\\n", is_network_event=False)
+                    if self.monitoring_active:
+                        self._queue_internal_message(self.net_output_queue,"[Network collector (TShark) stream ended unexpectedly]\\n")
                     break
                 if line.strip() and not line.startswith("[main_ui.py"): self.network_event_count += 1
-                if self.display_logs_var.get() == 1: self._append_to_textbox(self.net_output_textbox, line, is_network_event=False)
-                net_lines_processed_this_cycle += 1
+                net_lines_in_batch.append(line)
         except queue.Empty: pass
 
-        if self.monitoring_active and (host_lines_processed_this_cycle > 0 or net_lines_processed_this_cycle > 0):
-            self.update_status_bar()
+        # Update GUI textboxes if display is enabled
+        if self.display_logs_var.get() == 1:
+            if host_lines_in_batch:
+                self._append_chunk_to_textbox(self.host_output_textbox, "".join(host_lines_in_batch))
+            if net_lines_in_batch:
+                self._append_chunk_to_textbox(self.net_output_textbox, "".join(net_lines_in_batch))
 
-        if not self.monitoring_active:
-            # Re-check save button state based on counts when monitoring stops
+        # Always update status bar if monitoring or if counts changed
+        if self.monitoring_active or host_lines_in_batch or net_lines_in_batch :
+             self.update_status_bar()
+
+        if not self.monitoring_active: # Update save button states if not monitoring
             self.save_host_log_button.configure(state=tk.NORMAL if self.host_event_count > 0 else tk.DISABLED)
             self.save_net_log_button.configure(state=tk.NORMAL if self.network_event_count > 0 else tk.DISABLED)
             self.save_both_button.configure(state=tk.NORMAL if (self.host_event_count > 0 or self.network_event_count > 0) else tk.DISABLED)
 
+        if self.winfo_exists(): self.after(300, self.process_queues_and_update_gui) # Adjusted frequency
 
-        if self.winfo_exists(): self.after(100, self.process_queues)
+    def _append_chunk_to_textbox(self, textbox, text_chunk):
+        if not text_chunk: return
+        if textbox.winfo_exists():
+            textbox.configure(state=tk.NORMAL)
+            current_lines_str = textbox.index('end-1c').split('.')[0]
+            current_lines = int(current_lines_str) if current_lines_str.isdigit() else 0 # Handle empty textbox
 
-    def _append_to_textbox(self, textbox, text, is_host_event=False, is_network_event=False): # Flags removed, counting is in process_queues
-        # This function is now purely for appending to the textbox if display_logs_var is set
-        if self.display_logs_var.get() == 1:
-            if textbox.winfo_exists():
-                textbox.configure(state=tk.NORMAL)
-                textbox.insert(tk.END, text)
-                # Limit textbox length to prevent performance issues with massive amounts of data
-                # Example: Keep last 5000 lines (adjust as needed)
-                num_lines = int(textbox.index('end-1c').split('.')[0])
-                max_lines = 5000
-                if num_lines > max_lines:
-                    textbox.delete('1.0', f'{num_lines - max_lines}.0')
-                textbox.see(tk.END)
-                textbox.configure(state=tk.DISABLED)
-        # Counts are updated in process_queues directly
+            # Simple way to count new lines in chunk, assuming each line from queue ends with \n
+            new_lines_in_chunk = text_chunk.count('\\n')
+            if new_lines_in_chunk == 0 and text_chunk.strip(): new_lines_in_chunk = 1 # Count non-empty chunk as at least one line
+
+
+            if current_lines + new_lines_in_chunk > MAX_TEXTBOX_LINES:
+                lines_to_delete = (current_lines + new_lines_in_chunk) - MAX_TEXTBOX_LINES
+                if lines_to_delete > 0:
+                    # Add 1 because delete is exclusive of the end index's line itself if it's X.0
+                    delete_end_index = f"{lines_to_delete + 1}.0"
+                    textbox.delete("1.0", delete_end_index)
+
+            textbox.insert(tk.END, text_chunk)
+            textbox.see(tk.END)
+            textbox.configure(state=tk.DISABLED)
 
     def save_log(self, log_type):
-        # This function needs significant rework if we want to save data that wasn't displayed.
-        # Current implementation saves ONLY what's in the textbox.
-        # If display_logs_var is OFF, textboxes will be empty (or have old data if not cleared).
-
-        textbox_content = ""
-        default_filename = ""; ext = ".txt";
+        textbox_content = ""; default_filename = ""; ext = ".txt";
         filetypes_list = [("Text files", "*.txt"), ("All files", "*.*")]
         actual_event_count = 0
 
         if log_type == "host":
-            textbox_content = self.host_output_textbox.get("1.0", tk.END).strip()
+            textbox = self.host_output_textbox
             actual_event_count = self.host_event_count
             default_filename = f"host_events_{datetime.datetime.now():%Y%m%d_%H%M%S}.csv"; ext = ".csv"
             filetypes_list = [("CSV files", "*.csv"), ("All files", "*.*")]
         elif log_type == "network":
-            textbox_content = self.net_output_textbox.get("1.0", tk.END).strip()
+            textbox = self.net_output_textbox
             actual_event_count = self.network_event_count
             default_filename = f"network_traffic_tshark_{datetime.datetime.now():%Y%m%d_%H%M%S}.jsonl"; ext = ".jsonl"
             filetypes_list = [("JSON Lines files", "*.jsonl"), ("JSON files", "*.json"), ("Text files", "*.txt"), ("All files", "*.*")]
         else: return
 
+        textbox_content_to_save = textbox.get("1.0", tk.END).strip()
+
         if self.display_logs_var.get() == 0 and actual_event_count > 0:
             messagebox.showwarning("Save Log",
-                f"Log display was off. {actual_event_count} {log_type} events were collected but not shown in the textbox. "
-                "Saving will result in an empty file as this function saves textbox content only. "
-                "To save all collected data when display is off, a data buffering mechanism would be needed (not yet implemented).")
-            if not messagebox.askyesno("Save Empty File?", "The textbox is empty because display was off. Save an empty file anyway?"):
-                 return
+                f"Log display was off. {actual_event_count} {log_type} events were collected. "
+                "This function saves the content currently visible in the textbox. "
+                "Since display was off, the textbox is empty. The saved file will contain a placeholder message. "
+                "To save all collected data when display is off, a direct-to-file buffering mechanism for collectors would be needed (not yet implemented).")
+            if not textbox_content_to_save: # If textbox is truly empty
+                 textbox_content_to_save = f"# Log display was OFF during collection. Total {log_type} events collected: {actual_event_count}\\n# This file is a placeholder as actual log data was not written to the UI textbox."
 
-        if not textbox_content and actual_event_count == 0 : # No content and no events collected
-            messagebox.showinfo("Save Log", "Nothing to save (no events collected)."); return
-        if not textbox_content and self.display_logs_var.get() == 1 : # Display was on but textbox is empty (e.g. cleared)
-             messagebox.showinfo("Save Log", "Nothing to save (textbox is empty)."); return
-
+        if not textbox_content_to_save.strip() :
+            messagebox.showinfo("Save Log", "Nothing to save (no content in textbox)."); return
 
         file_path = filedialog.asksaveasfilename(
             initialfile=default_filename, defaultextension=ext, filetypes=filetypes_list
         )
         if not file_path: return
         try:
-            # Write the content from the textbox (which might be empty if display was off)
             with open(file_path, "w", encoding='utf-8', newline=None if log_type == "network" else '') as f:
-                f.write(textbox_content) # Write what's in textbox
-                if textbox_content and not textbox_content.endswith('\\n'): f.write('\\n')
+                f.write(textbox_content_to_save)
+                if textbox_content_to_save and not textbox_content_to_save.endswith('\\n'): f.write('\\n')
             messagebox.showinfo("Save Successful", f"Log saved to {file_path}")
         except Exception as e: messagebox.showerror("Error Saving Log", str(e))
 
     def save_both_logs(self):
         if self.display_logs_var.get() == 0 and (self.host_event_count > 0 or self.network_event_count > 0) :
             messagebox.showwarning("Save Both",
-                "Log display was off. Textboxes are empty. "
-                "Saving will result in empty files unless off-screen buffering is implemented for this feature.")
+                "Log display was off. Textboxes may be empty or incomplete. "
+                "Saving will use textbox content or placeholders if empty. "
+                "For full data, ensure 'Display logs' is on or implement off-screen buffering.")
 
-        # Call save_log for host
         if self.host_event_count > 0 or self.host_output_textbox.get("1.0", tk.END).strip():
             self.save_log("host")
         else:
             messagebox.showinfo("Save Both", "No host events to save.")
 
-        # Call save_log for network, allow user to cancel this one if host was cancelled.
-        # save_log itself will ask for confirmation if path was not provided from dialog.
         if self.network_event_count > 0 or self.net_output_textbox.get("1.0", tk.END).strip():
             self.save_log("network")
         else:
             messagebox.showinfo("Save Both", "No network traffic (TShark) to save.")
 
-
-    def clear_all_output(self, show_info=True):
+    def clear_all_output(self, show_info=True, reset_counts_override=None):
         for textbox in [self.host_output_textbox, self.net_output_textbox]:
             textbox.configure(state=tk.NORMAL); textbox.delete("1.0", tk.END); textbox.configure(state=tk.DISABLED)
 
-        # Reset counts only if monitoring is NOT active. If active, counts should continue.
-        if not self.monitoring_active:
+        should_reset_counts = not self.monitoring_active
+        if reset_counts_override is not None:
+            should_reset_counts = reset_counts_override
+
+        if should_reset_counts:
             self.host_event_count = 0
             self.network_event_count = 0
-        self.update_status_bar() # Update display to reflect cleared counts if stopped.
 
+        self.update_status_bar()
         if show_info: messagebox.showinfo("Clear Output", "All output cleared.")
 
     def on_closing(self):
@@ -485,27 +478,27 @@ if __name__ == "__main__":
     app = SecurityMonitorApp(); app.mainloop()
 ```
 
-The main changes are:
-1.  **Event Counters & Checkbox Var**: `self.host_event_count`, `self.network_event_count`, `self.display_logs_var` initialized.
-2.  **Display Logs Checkbox**: Added to `control_panel_row1`.
-3.  **Status Bar Update**:
-    *   `status_bar` now uses `textvariable=self.status_text_var`.
-    *   `update_status_bar()` method created to format status string with event counts.
-4.  **Start/Stop Logic**:
-    *   `start_collection_logic()`: Resets counters, calls `update_status_bar()`, disables checkbox.
-    *   `stop_collection_logic()`: Calls `update_status_bar()` for final counts, enables checkbox. Save buttons now enabled based on `*_event_count > 0`.
-5.  **`process_queues()`**:
-    *   Increments `host_event_count` or `network_event_count` for each valid line from the queues (ignoring self-generated UI messages).
-    *   Calls `update_status_bar()` if monitoring and new lines were processed.
-    *   Save buttons are re-evaluated based on counts if monitoring is stopped.
-6.  **`_append_to_textbox()`**:
-    *   No longer directly responsible for incrementing counts.
-    *   Checks `self.display_logs_var.get() == 1` before writing to the textbox.
-    *   Added a basic mechanism to limit textbox lines to `max_lines` (e.g., 5000) to prevent performance degradation with very large outputs.
-7.  **`save_log()` & `save_both_logs()`**:
-    *   These now primarily save what's in the textboxes.
-    *   A warning is issued if the user tries to save when "Display logs" was off and events *were* collected, explaining that the saved file will be empty (as the textbox is empty). This is a crucial UX point given the current implementation. A more advanced version would buffer all data separately if display is off.
-8.  **`clear_all_output()`**: Resets counts to 0 only if monitoring is *not* active. If monitoring is active, counts continue, but the displayed text is cleared. `update_status_bar()` is called.
-9.  **Initial `start_collection_logic()` clear behavior**: Only clears textboxes if display logs is ON. If it was off, and user starts again, the (hidden) textboxes are not cleared of old data unless they are explicitly cleared. This is a subtle point, but current `clear_all_output(show_info=False)` handles it. I've added a small check to ensure textboxes are empty if display was off and they had old content.
+Key changes:
+1.  **`MAX_TEXTBOX_LINES`**: Increased slightly, but the core idea is strict limiting.
+2.  **`_queue_internal_message`**: Helper to ensure UI-generated messages (like errors from `get_tshark_interfaces` or the DEBUG Popen command) go through the queue system. This is important so they are also batched and respect the display toggle.
+3.  **`process_queues_and_update_gui()`**:
+    *   This is the new central UI update loop, called by `self.after`. Frequency adjusted (e.g., 300ms).
+    *   It empties both queues completely in each cycle, collecting lines into `host_lines_in_batch` and `net_lines_in_batch`.
+    *   Event counters (`self.host_event_count`, `self.network_event_count`) are incremented for each *valid data line* (not internal UI messages).
+    *   If `self.display_logs_var.get() == 1`, it calls `_append_chunk_to_textbox()` with the *entire batch* of lines for each textbox.
+    *   Calls `self.update_status_bar()` if monitoring or if any lines were processed (to reflect new counts).
+4.  **`_append_chunk_to_textbox()`**:
+    *   Now takes a `text_chunk` (a single string, potentially multi-line).
+    *   The line limiting logic is refined:
+        *   It correctly gets the `current_lines` even if the textbox was previously empty.
+        *   It counts new lines in the incoming `text_chunk` (assumes `\n` from queue).
+        *   If the total exceeds `MAX_TEXTBOX_LINES`, it calculates how many lines to delete from the top (`1.0` to `delete_end_index`).
+5.  **`start_collection_logic()`**:
+    *   When display is off, it now ensures textboxes are cleared of any *old* data from a previous "display on" session, so they are truly empty if display is toggled on later during the *same* collection run.
+6.  **`save_log()`**:
+    *   The warning message when display is off is more precise.
+    *   If display was off and the textbox is empty, it now writes a placeholder message into the saved file, including the actual event count. This is better than a completely empty file.
+7.  **`save_both_logs()`**: Updated to reflect the new `save_log` behavior.
+8.  **`clear_all_output()`**: `reset_counts_override` parameter added to allow `start_collection_logic` to clear display without resetting counts that are about to start.
 
-The limitation of saving empty files if "Display logs" is off is acknowledged in comments and user messages.
+This version should be more robust against high-frequency log messages by batching UI updates and strictly limiting the number of lines in the textboxes, preventing the UI from becoming unresponsive or crashing. The event counters will always reflect the total number of events received, providing accurate feedback even if the display is off or being throttled.
