@@ -48,7 +48,7 @@ def handle_stderr_thread_func(process, initial_capture_list=None, initial_captur
     """Reads stderr from process, optionally capturing initial lines."""
     if process and process.stderr:
         lines_captured = 0
-        for line in iter(process.stderr.readline, ''):
+        for line in iter(process.stderr.readline, ''): # Stays text, Popen handles decoding for stderr too if encoding is set
             if line:
                 line_strip = line.strip()
                 print(f"TShark STDERR: {line_strip}", file=sys.stderr)
@@ -68,9 +68,17 @@ def start_tshark_and_read_stdout(tshark_cmd_list):
 
     try:
         tshark_process = subprocess.Popen(
-            tshark_cmd_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1, universal_newlines=True, creationflags=subprocess.CREATE_NO_WINDOW
+            tshark_cmd_list,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding='utf-8',     # Specify UTF-8 encoding for stdout/stderr
+            errors='replace',     # Handle potential decoding errors gracefully
+            bufsize=1,
+            universal_newlines=True, # With text=True, this helps normalize line endings
+            creationflags=subprocess.CREATE_NO_WINDOW
         )
+        # Stderr will also be decoded with utf-8, errors='replace' due to Popen's behavior with encoding.
         stderr_thread = threading.Thread(target=handle_stderr_thread_func, args=(tshark_process, stderr_capture_list), daemon=True)
         stderr_thread.start()
         time.sleep(2.5)
@@ -90,8 +98,10 @@ def start_tshark_and_read_stdout(tshark_cmd_list):
 
         print(f"TShark started successfully (command: {' '.join(tshark_cmd_list)}).", file=sys.stderr)
         if tshark_process.stdout:
-            for line in iter(tshark_process.stdout.readline, ''):
-                if line: sys.stdout.write(line); sys.stdout.flush()
+            for line in iter(tshark_process.stdout.readline, ''): # line will be str
+                if line:
+                    sys.stdout.write(line) # Write str directly
+                    sys.stdout.flush()
             tshark_process.stdout.close()
         tshark_process.wait()
         if tshark_process.returncode != 0 and tshark_process.returncode is not None:
@@ -104,33 +114,37 @@ def start_tshark_and_read_stdout(tshark_cmd_list):
         print(f"Unexpected error running TShark ({' '.join(tshark_cmd_list)}): {e}", file=sys.stderr)
         return False
 
-def main(cli_interface_arg=None): # Accept CLI argument
+def main(cli_interface_arg=None):
+    print(f"[{datetime.datetime.now().isoformat()}] network_collector_windows.py: Script launched.", file=sys.stderr)
+    print(f"[DEBUG network_collector.py] Raw sys.argv: {sys.argv}", file=sys.stderr)
+    print(f"[DEBUG network_collector.py] Value of cli_interface_arg in main(): '{cli_interface_arg}'", file=sys.stderr)
+    sys.stderr.flush()
+
     global tshark_process
     base_tshark_cmd = ["tshark.exe", "-n", "-l"]
     interface_to_use = None
-    source_of_interface = "None" # Keep track of how the interface was chosen for logging
+    source_of_interface = "None"
 
     if cli_interface_arg:
         interface_to_use = cli_interface_arg
         source_of_interface = "Command-Line Argument"
-        print(f"Info: Using interface '{interface_to_use}' from command-line argument.", file=sys.stderr)
+        print(f"Info: Using interface '{interface_to_use}' from {source_of_interface}.", file=sys.stderr)
         tshark_cmd_final = list(base_tshark_cmd)
         tshark_cmd_final.extend(["-i", interface_to_use])
         if not start_tshark_and_read_stdout(tshark_cmd_final):
             print(f"Error: TShark failed with command-line specified interface '{interface_to_use}'.", file=sys.stderr)
-        return # Exit after trying CLI specified interface
+        return
 
     if USER_SPECIFIED_INTERFACE and USER_SPECIFIED_INTERFACE.strip():
         interface_to_use = USER_SPECIFIED_INTERFACE.strip()
         source_of_interface = "In-Script Variable (USER_SPECIFIED_INTERFACE)"
-        print(f"Info: Using interface '{interface_to_use}' from in-script variable.", file=sys.stderr)
+        print(f"Info: Using interface '{interface_to_use}' from {source_of_interface}.", file=sys.stderr)
         tshark_cmd_final = list(base_tshark_cmd)
         tshark_cmd_final.extend(["-i", interface_to_use])
         if not start_tshark_and_read_stdout(tshark_cmd_final):
             print(f"Error: TShark failed with in-script specified interface '{interface_to_use}'.", file=sys.stderr)
-        return # Exit after trying in-script specified interface
+        return
 
-    # --- Automatic detection if no interface specified by CLI or in-script variable ---
     print(f"Info: No interface specified by CLI or in-script variable. Attempting auto-detection.", file=sys.stderr)
     selected_interface = find_suitable_interface()
     tshark_cmd_attempt1 = list(base_tshark_cmd)
@@ -142,17 +156,15 @@ def main(cli_interface_arg=None): # Accept CLI argument
             return
         print(f"Info: Attempt with auto-selected interface ('{selected_interface}') failed. Trying TShark default.", file=sys.stderr)
     else:
-        source_of_interface = "Auto-detection (psutil failed)" # Updated source info
+        source_of_interface = "Auto-detection (psutil failed)"
         print(f"Info: No specific interface auto-selected. Proceeding with TShark default.", file=sys.stderr)
 
-    # --- Fallback to TShark default ---
-    source_of_interface = "TShark Default" # Updated source info
+    source_of_interface = "TShark Default"
     print(f"Info: Attempting to run TShark with its default interface.", file=sys.stderr)
     tshark_cmd_attempt2 = list(base_tshark_cmd)
     if start_tshark_and_read_stdout(tshark_cmd_attempt2):
         return
 
-    # If all methods fail, print a comprehensive error message
     print(f"Error: TShark failed to start using method: {source_of_interface}.", file=sys.stderr)
     print("Please try running 'tshark -D' in a command prompt to list available interfaces. "
           "Then, provide the correct interface via the command-line (-i INTERFACE), "
@@ -168,9 +180,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     try:
-        main(cli_interface_arg=args.interface) # Pass the parsed arg to main
+        main(cli_interface_arg=args.interface)
     except KeyboardInterrupt:
-        print(f"[{datetime.datetime.now().isoformat()}] network_collector_windows.py: Stopping due to KeyboardInterrupt.", file=sys.stderr)
+        print(f"\n[{datetime.datetime.now().isoformat()}] network_collector_windows.py: Stopping due to KeyboardInterrupt.", file=sys.stderr)
     finally:
         if tshark_process and tshark_process.poll() is None:
             print(f"[{datetime.datetime.now().isoformat()}] network_collector_windows.py: Terminating TShark process.", file=sys.stderr)
