@@ -48,7 +48,7 @@ def handle_stderr_thread_func(process, initial_capture_list=None, initial_captur
     """Reads stderr from process, optionally capturing initial lines."""
     if process and process.stderr:
         lines_captured = 0
-        for line in iter(process.stderr.readline, ''): # Stays text, Popen handles decoding for stderr too if encoding is set
+        for line in iter(process.stderr.readline, ''):
             if line:
                 line_strip = line.strip()
                 print(f"TShark STDERR: {line_strip}", file=sys.stderr)
@@ -72,35 +72,36 @@ def start_tshark_and_read_stdout(tshark_cmd_list):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            encoding='utf-8',     # Specify UTF-8 encoding for stdout/stderr
-            errors='replace',     # Handle potential decoding errors gracefully
+            encoding='utf-8',
+            errors='replace',
             bufsize=1,
-            universal_newlines=True, # With text=True, this helps normalize line endings
+            # universal_newlines=True, # Not strictly needed if text=True and encoding is set, but harmless.
+                                     # -T ek typically ensures newline per JSON object.
             creationflags=subprocess.CREATE_NO_WINDOW
         )
-        # Stderr will also be decoded with utf-8, errors='replace' due to Popen's behavior with encoding.
         stderr_thread = threading.Thread(target=handle_stderr_thread_func, args=(tshark_process, stderr_capture_list), daemon=True)
         stderr_thread.start()
-        time.sleep(2.5)
+        time.sleep(2.5) # Allow time for TShark to start or fail with adapter errors
 
         if tshark_process.poll() is not None:
             with stderr_capture_lock:
                 adapter_error_indicators = [
                     "Error opening adapter", "cannot find the device specified", "No such device",
-                    "could not be initiated", "failed to set hardware filter", "Can't get adoration type"
+                    "could not be initiated", "failed to set hardware filter", "Can't get adoration type",
+                    "Invalid capture filter" # Another possible error if -i is misinterpreted with -T ek
                 ]
                 for err_line in stderr_capture_list:
                     if any(indicator.lower() in err_line.lower() for indicator in adapter_error_indicators):
-                        print(f"TShark failed to start (command: {' '.join(tshark_cmd_list)}) due to adapter error.", file=sys.stderr)
+                        print(f"TShark failed to start (command: {' '.join(tshark_cmd_list)}) due to adapter or critical error.", file=sys.stderr)
                         return False
             print(f"TShark exited quickly (code {tshark_process.returncode}, command: {' '.join(tshark_cmd_list)}).", file=sys.stderr)
             return False
 
-        print(f"TShark started successfully (command: {' '.join(tshark_cmd_list)}).", file=sys.stderr)
+        print(f"TShark started successfully (command: {' '.join(tshark_cmd_list)}). Outputting JSON.", file=sys.stderr)
         if tshark_process.stdout:
-            for line in iter(tshark_process.stdout.readline, ''): # line will be str
-                if line:
-                    sys.stdout.write(line) # Write str directly
+            for line in iter(tshark_process.stdout.readline, ''):
+                if line: # Each line should be a complete JSON object with -T ek
+                    sys.stdout.write(line)
                     sys.stdout.flush()
             tshark_process.stdout.close()
         tshark_process.wait()
@@ -121,7 +122,11 @@ def main(cli_interface_arg=None):
     sys.stderr.flush()
 
     global tshark_process
-    base_tshark_cmd = ["tshark.exe", "-n", "-l"]
+    # Changed base TShark command for JSON output
+    base_tshark_cmd = ["tshark.exe", "-n", "-T", "ek"]
+    # Note: -l (line-buffering) is generally not used with -T ek as -T ek implies its own output flushing.
+    # If output is still buffered unexpectedly, might need to explore TShark options like --capture-comment or specific flush flags if available for JSON mode.
+
     interface_to_use = None
     source_of_interface = "None"
 
@@ -130,6 +135,7 @@ def main(cli_interface_arg=None):
         source_of_interface = "Command-Line Argument"
         print(f"Info: Using interface '{interface_to_use}' from {source_of_interface}.", file=sys.stderr)
         tshark_cmd_final = list(base_tshark_cmd)
+        # Interface argument for TShark is typically -i
         tshark_cmd_final.extend(["-i", interface_to_use])
         if not start_tshark_and_read_stdout(tshark_cmd_final):
             print(f"Error: TShark failed with command-line specified interface '{interface_to_use}'.", file=sys.stderr)
@@ -160,8 +166,9 @@ def main(cli_interface_arg=None):
         print(f"Info: No specific interface auto-selected. Proceeding with TShark default.", file=sys.stderr)
 
     source_of_interface = "TShark Default"
-    print(f"Info: Attempting to run TShark with its default interface.", file=sys.stderr)
-    tshark_cmd_attempt2 = list(base_tshark_cmd)
+    print(f"Info: Attempting to run TShark with its default interface (no -i flag).", file=sys.stderr)
+    # For TShark default, we don't add "-i" at all.
+    tshark_cmd_attempt2 = list(base_tshark_cmd) # base_tshark_cmd already excludes -i here
     if start_tshark_and_read_stdout(tshark_cmd_attempt2):
         return
 
@@ -173,7 +180,7 @@ def main(cli_interface_arg=None):
     sys.stderr.flush()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Network collector script using TShark. Captures network traffic.")
+    parser = argparse.ArgumentParser(description="Network collector script using TShark. Captures network traffic and outputs JSON.")
     parser.add_argument("-i", "--interface", type=str, default=None,
                         help="Network interface identifier to capture on (e.g., number from 'tshark -D' or name). "
                              "Overrides in-script USER_SPECIFIED_INTERFACE and auto-detection.")
